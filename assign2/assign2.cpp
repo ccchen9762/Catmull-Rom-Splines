@@ -26,14 +26,18 @@
 cv::Mat3b groundBGR;
 cv::Mat3b skyBGR;
 
-/* represents one control point along the spline */
-struct point {
+struct spaceVector {
 	double x;
 	double y;
 	double z;
+
+	inline spaceVector operator*(int num) {
+		return spaceVector{ x * num , y * num, z * num };
+	}
 };
 
-struct spaceVector {
+/* represents one control point along the spline */
+struct point {
 	double x;
 	double y;
 	double z;
@@ -76,8 +80,7 @@ float* railDerivative;
 
 // transformation variable
 float g_vLandRotate[3] = { 0.0f, 0.0f, 0.0f };
-float g_vLandTranslate[3] = { 0.0f, 0.0f, -5.0f };
-float g_vLandScale[3] = { 1.0f, 1.0f, 1.0f };
+float g_vLandTranslate[3] = { 0.0f, 0.0f, 0.0f };
 
 int g_vMousePos[2] = { 0, 0 };
 int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
@@ -87,7 +90,7 @@ int g_iRightMouseButton = 0;
 enum class CONTROLSTATE { ROTATE, TRANSLATE, SCALE };
 CONTROLSTATE g_ControlState = CONTROLSTATE::ROTATE;
 
-enum class VIEWSTATE { RIDE, OVERVIEW };
+enum class VIEWSTATE { RIDE, STOP, OVERVIEW };
 VIEWSTATE g_ViewState = VIEWSTATE::RIDE;
 
 GLuint texture;
@@ -216,6 +219,291 @@ void buildSpline(point c1, point c2, point c3, point c4, int now) {
 	delete[] splineMatrix;
 }
 
+void textureInit(cv::Mat3b& image) {
+	glGenTextures(1, &texture);
+	glBindTexture(GL_TEXTURE_2D, texture);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+
+	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 1024, 1024, GL_RGB, GL_UNSIGNED_BYTE, image.data);
+	//glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1024, 1024, 0, GL_RGB, GL_UNSIGNED_BYTE, image.data);
+}
+
+void myinit() {
+	glClearColor(0.0, 0.0, 0.0, 0.0);
+	glEnable(GL_DEPTH_TEST);
+	glShadeModel(GL_SMOOTH);
+
+	//light settings
+	glEnable(GL_LIGHTING);
+	glEnable(GL_LIGHT0);
+	GLfloat light_ambient[] = { 0.2f, 0.2f, 0.2f, 1.0f };
+	GLfloat light_diffuse[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	GLfloat light_specular[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	GLfloat light_position[] = { 0.0f, 0.0f, 1.0f, 0.0f };
+	glLightfv(GL_LIGHT0, GL_AMBIENT, light_ambient);
+	glLightfv(GL_LIGHT0, GL_DIFFUSE, light_diffuse);
+	glLightfv(GL_LIGHT0, GL_SPECULAR, light_specular);
+	glLightfv(GL_LIGHT0, GL_POSITION, light_position);
+	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+	//glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_FALSE);
+
+	// allocate rail memory
+	rail = new point[(g_Splines->numControlPoints - 3) * 1000 + 1];
+	railTangent = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
+	railDerivative = new float[(g_Splines->numControlPoints - 3) * 1000 + 1];
+	railNormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
+	railBinormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 2];
+	railBinormal[0] = spaceVector{ 0.0, -1.0, 0.0 };	//set first arbitrary binormal
+
+	for (int i = 0; i < g_Splines->numControlPoints - 3; i++) {
+		buildSpline(g_Splines->points[i],
+					g_Splines->points[i + 1],
+					g_Splines->points[i + 2],
+					g_Splines->points[i + 3], i);
+	}
+
+	//set boundary
+	hMin -= 1.0f, xMin -= 5.0f, yMin -= 5.0f, xMax += 5.0f, yMax += 5.0f;
+	width = xMax - xMin, length = yMax - yMin;
+	width = width < length ? length : width;
+
+	textureInit(groundBGR);
+}
+
+void drawFace(int v1, int v2, int v3, int v4, point vertices[8], spaceVector& normal) {
+	glNormal3f(normal.x, normal.y, normal.z);
+	glBegin(GL_POLYGON);
+	glVertex3f(vertices[v1].x, vertices[v1].y, vertices[v1].z);
+	glVertex3f(vertices[v2].x, vertices[v2].y, vertices[v2].z);
+	glVertex3f(vertices[v3].x, vertices[v3].y, vertices[v3].z);
+	glVertex3f(vertices[v4].x, vertices[v4].y, vertices[v4].z);
+	glEnd();
+}
+
+void drawCube(int i) {
+	//main rail
+	float alpha = 0.002f;
+	point vertices[8] = {
+		{rail[i + 1].x + alpha * (-railNormal[i + 1].x - railBinormal[i + 2].x),
+		 rail[i + 1].y + alpha * (-railNormal[i + 1].y - railBinormal[i + 2].y),
+		 rail[i + 1].z + alpha * (-railNormal[i + 1].z - railBinormal[i + 2].z) },
+		{rail[i + 1].x + alpha * (-railNormal[i + 1].x + railBinormal[i + 2].x),
+		 rail[i + 1].y + alpha * (-railNormal[i + 1].y + railBinormal[i + 2].y),
+		 rail[i + 1].z + alpha * (-railNormal[i + 1].z + railBinormal[i + 2].z) },
+		{rail[i + 1].x + alpha * (railNormal[i + 1].x + railBinormal[i + 2].x),
+		 rail[i + 1].y + alpha * (railNormal[i + 1].y + railBinormal[i + 2].y),
+		 rail[i + 1].z + alpha * (railNormal[i + 1].z + railBinormal[i + 2].z) },
+		{rail[i + 1].x + alpha * (railNormal[i + 1].x - railBinormal[i + 2].x),
+		 rail[i + 1].y + alpha * (railNormal[i + 1].y - railBinormal[i + 2].y),
+		 rail[i + 1].z + alpha * (railNormal[i + 1].z - railBinormal[i + 2].z) },
+		{rail[i].x + alpha * (-railNormal[i].x - railBinormal[i + 1].x),
+		 rail[i].y + alpha * (-railNormal[i].y - railBinormal[i + 1].y),
+		 rail[i].z + alpha * (-railNormal[i].z - railBinormal[i + 1].z) },
+		{rail[i].x + alpha * (-railNormal[i].x + railBinormal[i + 1].x),
+		 rail[i].y + alpha * (-railNormal[i].y + railBinormal[i + 1].y),
+		 rail[i].z + alpha * (-railNormal[i].z + railBinormal[i + 1].z) },
+		{rail[i].x + alpha * (railNormal[i].x + railBinormal[i + 1].x),
+		 rail[i].y + alpha * (railNormal[i].y + railBinormal[i + 1].y),
+		 rail[i].z + alpha * (railNormal[i].z + railBinormal[i + 1].z) },
+		{rail[i].x + alpha * (railNormal[i].x - railBinormal[i + 1].x),
+		 rail[i].y + alpha * (railNormal[i].y - railBinormal[i + 1].y),
+		 rail[i].z + alpha * (railNormal[i].z - railBinormal[i + 1].z) },
+	};
+
+	//drawFace(0, 3, 2, 1, vertices, railTangent[i] * -1);
+	drawFace(2, 3, 7, 6, vertices, railBinormal[i + 1]);
+	drawFace(0, 4, 7, 3, vertices, railNormal[i] * -1);
+	drawFace(1, 2, 6, 5, vertices, railNormal[i]);
+	//drawFace(4, 5, 6, 7, vertices, railTangent[i]);
+	drawFace(0, 1, 5, 4, vertices, railBinormal[i + 1] * -1);
+
+	//second rail
+	float beta = 0.02f;
+	for (int j = 0; j < 4; j++) {
+		vertices[j].x += beta * railBinormal[i + 1].x;
+		vertices[j].y += beta * railBinormal[i + 1].y;
+		vertices[j].z += beta * railBinormal[i + 1].z;
+		vertices[j + 4].x += beta * railBinormal[i + 1].x;
+		vertices[j + 4].y += beta * railBinormal[i + 1].y;
+		vertices[j + 4].z += beta * railBinormal[i + 1].z;
+	}
+
+	//drawFace(0, 3, 2, 1, vertices, railTangent[i] * -1);
+	drawFace(2, 3, 7, 6, vertices, railBinormal[i + 1]);
+	drawFace(0, 4, 7, 3, vertices, railNormal[i] * -1);
+	drawFace(1, 2, 6, 5, vertices, railNormal[i]);
+	//drawFace(4, 5, 6, 7, vertices, railTangent[i]);
+	drawFace(0, 1, 5, 4, vertices, railBinormal[i + 1] * -1);
+}
+
+void display() {
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	//transformation matrix
+	float passengerOffset = 0.01f;	 //set eyeposition above the rail
+	float middleOffset = 0.01f;	//set eyepostion between 2 rails
+	if (g_ViewState == VIEWSTATE::OVERVIEW) {	//manual control
+		glTranslatef(g_vLandTranslate[0], g_vLandTranslate[1], g_vLandTranslate[2]);
+		glRotatef(g_vLandRotate[0], 1.0, 0.0, 0.0);
+		glRotatef(g_vLandRotate[1], 0.0, 1.0, 0.0);
+		glRotatef(g_vLandRotate[2], 0.0, 0.0, 1.0);
+	}
+	gluLookAt(rail[position].x + passengerOffset * railNormal[position].x + middleOffset * railBinormal[position + 1].x,
+			  rail[position].y + passengerOffset * railNormal[position].y + middleOffset * railBinormal[position + 1].y,
+			  rail[position].z + passengerOffset * railNormal[position].z + middleOffset * railBinormal[position + 1].z,
+			  rail[position].x + railTangent[position].x + middleOffset * railBinormal[position + 1].x,
+			  rail[position].y + railTangent[position].y + middleOffset * railBinormal[position + 1].y,
+			  rail[position].z + railTangent[position].z + middleOffset * railBinormal[position + 1].z,
+			  railNormal[position].x, railNormal[position].y, railNormal[position].z);
+	
+	
+	//glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+
+	//ground plane
+	glEnable(GL_TEXTURE_2D);
+	glNormal3f(0.0f, 0.0f, 1.0f);
+	glBegin(GL_POLYGON);
+	glTexCoord2f(width, length);
+	glVertex3f(xMin + width, yMin + width, hMin);
+	glTexCoord2f(0.0, length);
+	glVertex3f(xMin, yMin + width, hMin);
+	glTexCoord2f(0.0, 0.0);
+	glVertex3f(xMin, yMin, hMin);
+	glTexCoord2f(width, 0.0);
+	glVertex3f(xMin + width, yMin, hMin);
+	glEnd();
+	glDisable(GL_TEXTURE_2D);
+
+	GLfloat mat_a[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	GLfloat mat_d[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	GLfloat mat_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	GLfloat low_sh[] = { 5.0f };
+	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a);
+	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d);
+	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s);
+	glMaterialfv(GL_FRONT, GL_SHININESS, low_sh);
+
+	for (int i = 0; i < (g_Splines->numControlPoints - 3) * 1000; i++)
+		drawCube(i);
+
+	glutSwapBuffers();
+}
+
+void reshape(int w, int h) {
+	GLfloat aspect = (GLfloat)w / (GLfloat)h;
+	glViewport(0, 0, w, h);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	gluPerspective(60.0, aspect, 0.01, 100.0);
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+}
+
+void doIdle() {
+	//control moving speed
+	if (g_ViewState == VIEWSTATE::RIDE) {
+		float speed = std::max(5.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
+		position += speed;
+		if (position > (g_Splines->numControlPoints - 3) * 1000)
+			position = 0;
+	}
+	/* update screen */
+	glutPostRedisplay();
+}
+
+void mousedrag(int x, int y) {
+	int vMouseDelta[2] = { x - g_vMousePos[0], y - g_vMousePos[1] };
+
+	switch (g_ControlState) {
+	case CONTROLSTATE::TRANSLATE:
+		if (g_iLeftMouseButton) {
+			g_vLandTranslate[0] += vMouseDelta[0] * 0.02;
+			g_vLandTranslate[1] -= vMouseDelta[1] * 0.02;
+		}
+		if (g_iMiddleMouseButton) {
+			g_vLandTranslate[2] += vMouseDelta[1] * 0.02;
+		}
+		break;
+	case CONTROLSTATE::ROTATE:
+		if (g_iLeftMouseButton) {
+			g_vLandRotate[0] += vMouseDelta[1];
+			g_vLandRotate[1] += vMouseDelta[0];
+		}
+		if (g_iMiddleMouseButton) {
+			g_vLandRotate[2] += vMouseDelta[1];
+		}
+		break;
+	}
+	g_vMousePos[0] = x;
+	g_vMousePos[1] = y;
+}
+
+void mouseidle(int x, int y) {
+	g_vMousePos[0] = x;
+	g_vMousePos[1] = y;
+}
+
+void mousebutton(int button, int state, int x, int y) {
+	switch (button) {
+	case GLUT_LEFT_BUTTON:
+		g_iLeftMouseButton = (state == GLUT_DOWN);
+		break;
+	case GLUT_MIDDLE_BUTTON:
+		g_iMiddleMouseButton = (state == GLUT_DOWN);
+		break;
+	case GLUT_RIGHT_BUTTON:
+		g_iRightMouseButton = (state == GLUT_DOWN);
+		break;
+	}
+
+	switch (glutGetModifiers()) {
+	case GLUT_ACTIVE_CTRL:
+		g_ControlState = CONTROLSTATE::TRANSLATE;
+		printf("Translating\n");
+		break;
+	case GLUT_ACTIVE_ALT:
+		g_ControlState = CONTROLSTATE::ROTATE;
+		printf("Rotating\n");
+		break;
+	}
+
+	g_vMousePos[0] = x;
+	g_vMousePos[1] = y;
+}
+
+void keyboard(unsigned char key, int x, int y) {
+	switch (key) {	//use keyboard to change the rendering method
+	case 'v':
+	case 'V':
+		printf("rail overview");
+		std::fill(g_vLandRotate, g_vLandRotate + 3, 0.0f);
+		std::fill(g_vLandTranslate, g_vLandTranslate + 3, 0.0f);
+		g_ViewState = VIEWSTATE::OVERVIEW;
+		break;
+	case 'r':
+	case 'R':
+		printf("ride on");
+		g_ViewState = VIEWSTATE::RIDE;
+		break;
+	case 's':
+	case 'S':
+		printf("pause");
+		g_ViewState = VIEWSTATE::STOP;
+		break;
+	case 'q':
+		exit(0);
+		break;
+	}
+}
+
 /* Write a screenshot to the specified filename */
 void saveScreenshot(char* filename) {
 	if (filename == NULL)
@@ -299,283 +587,6 @@ Access number of rows of image (height): image.rows;
 Access number of columns of image (width): image.cols;
 Pixel 0,0 is the upper left corner. Byte order for 3-channel images is BGR.
 */
-
-void textureInit(cv::Mat3b& image) {
-
-	glGenTextures(1, &texture);
-	glBindTexture(GL_TEXTURE_2D, texture);
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-
-	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 1024, 1024, GL_RGB, GL_UNSIGNED_BYTE, image.data);
-	//glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1024, 1024, 0, GL_RGB, GL_UNSIGNED_BYTE, image.data);
-}
-
-void myinit() {
-	glClearColor(0.0, 0.0, 0.0, 0.0);
-	glEnable(GL_DEPTH_TEST);
-	glShadeModel(GL_SMOOTH);
-
-	rail = new point[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railTangent = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railDerivative = new float[(g_Splines->numControlPoints - 3) * 1000 + 1];
-
-	railNormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railBinormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 2];
-	railBinormal[0] = spaceVector{ 0.0, -1.0, 0.0 };	//set first arbitrary binormal
-
-	for (int i = 0; i < g_Splines->numControlPoints - 3; i++) {
-		buildSpline(g_Splines->points[i],
-					g_Splines->points[i + 1],
-					g_Splines->points[i + 2],
-					g_Splines->points[i + 3], i);
-	}
-
-	//set boundary
-	hMin -= 1.0f;
-	xMin -= 5.0f, yMin -= 5.0f, xMax += 5.0f, yMax += 5.0f;
-	width = xMax - xMin, length = yMax - yMin;
-	width = width < length ? length : width;
-
-	textureInit(groundBGR);
-}
-
-void drawFace(int v1, int v2, int v3, int v4, float vertices[8][3]) {
-	glBegin(GL_POLYGON);
-	glVertex3fv(vertices[v1]);
-	glVertex3fv(vertices[v2]);
-	glVertex3fv(vertices[v3]);
-	glVertex3fv(vertices[v4]);
-	glEnd();
-}
-
-void drawCube(int i) {
-	//main rail
-	float alpha = 0.001f;
-	float vertices[8][3] = {
-	{rail[i].x + alpha * (-railNormal[i].x + railBinormal[i + 1].x),
-	 rail[i].y + alpha * (-railNormal[i].y + railBinormal[i + 1].y),
-	 rail[i].z + alpha * (-railNormal[i].z + railBinormal[i + 1].z) },
-	{rail[i].x + alpha * (railNormal[i].x + railBinormal[i + 1].x),
-	 rail[i].y + alpha * (railNormal[i].y + railBinormal[i + 1].y),
-	 rail[i].z + alpha * (railNormal[i].z + railBinormal[i + 1].z) },
-	{rail[i].x + alpha * (railNormal[i].x - railBinormal[i + 1].x),
-	 rail[i].y + alpha * (railNormal[i].y - railBinormal[i + 1].y),
-	 rail[i].z + alpha * (railNormal[i].z - railBinormal[i + 1].z) },
-	{rail[i].x + alpha * (-railNormal[i].x - railBinormal[i + 1].x),
-	 rail[i].y + alpha * (-railNormal[i].y - railBinormal[i + 1].y),
-	 rail[i].z + alpha * (-railNormal[i].z - railBinormal[i + 1].z) },
-	{rail[i + 1].x + alpha * (-railNormal[i + 1].x + railBinormal[i + 2].x),
-	 rail[i + 1].y + alpha * (-railNormal[i + 1].y + railBinormal[i + 2].y),
-	 rail[i + 1].z + alpha * (-railNormal[i + 1].z + railBinormal[i + 2].z) },
-	{rail[i + 1].x + alpha * (railNormal[i + 1].x + railBinormal[i + 2].x),
-	 rail[i + 1].y + alpha * (railNormal[i + 1].y + railBinormal[i + 2].y),
-	 rail[i + 1].z + alpha * (railNormal[i + 1].z + railBinormal[i + 2].z) },
-	{rail[i + 1].x + alpha * (railNormal[i + 1].x - railBinormal[i + 2].x),
-	 rail[i + 1].y + alpha * (railNormal[i + 1].y - railBinormal[i + 2].y),
-	 rail[i + 1].z + alpha * (railNormal[i + 1].z - railBinormal[i + 2].z) },
-	{rail[i + 1].x + alpha * (-railNormal[i + 1].x - railBinormal[i + 2].x),
-	 rail[i + 1].y + alpha * (-railNormal[i + 1].y - railBinormal[i + 2].y),
-	 rail[i + 1].z + alpha * (-railNormal[i + 1].z - railBinormal[i + 2].z) } };
-
-	drawFace(0, 3, 2, 1, vertices);
-	drawFace(2, 3, 7, 6, vertices);
-	drawFace(0, 4, 7, 3, vertices);
-	drawFace(1, 2, 6, 5, vertices);
-	drawFace(4, 5, 6, 7, vertices);
-	drawFace(0, 1, 5, 4, vertices);
-
-	//second rail
-	float beta = 0.02f;
-	for (int j = 0; j < 4; j++) {
-		vertices[j][0] += beta * railBinormal[i + 1].x;
-		vertices[j][1] += beta * railBinormal[i + 1].y;
-		vertices[j][2] += beta * railBinormal[i + 1].z;
-		vertices[j + 4][0] += beta * railBinormal[i + 2].x;
-		vertices[j + 4][1] += beta * railBinormal[i + 2].y;
-		vertices[j + 4][2] += beta * railBinormal[i + 2].z;
-	}
-
-	drawFace(0, 3, 2, 1, vertices);
-	drawFace(2, 3, 7, 6, vertices);
-	drawFace(0, 4, 7, 3, vertices);
-	drawFace(1, 2, 6, 5, vertices);
-	drawFace(4, 5, 6, 7, vertices);
-	drawFace(0, 1, 5, 4, vertices);
-}
-
-void display() {
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-	//transformation matrix
-	if (g_ViewState == VIEWSTATE::RIDE) {
-		float passengerOffset = 0.01f;	 //set eyeposition above the rail
-		float middleOffset = 0.01f;	//set eyepostion between 2 rails
-		gluLookAt(rail[position].x + passengerOffset * railNormal[position].x + middleOffset * railBinormal[position + 1].x,
-				  rail[position].y + passengerOffset * railNormal[position].y + middleOffset * railBinormal[position + 1].y,
-				  rail[position].z + passengerOffset * railNormal[position].z + middleOffset * railBinormal[position + 1].z,
-				  rail[position].x + railTangent[position].x + middleOffset * railBinormal[position + 1].x,
-				  rail[position].y + railTangent[position].y + middleOffset * railBinormal[position + 1].y,
-				  rail[position].z + railTangent[position].z + middleOffset * railBinormal[position + 1].z,
-				  railNormal[position].x, railNormal[position].y, railNormal[position].z);
-	}
-	else if (g_ViewState == VIEWSTATE::OVERVIEW) {
-		//manual control
-		glTranslatef(g_vLandTranslate[0], g_vLandTranslate[1], g_vLandTranslate[2]);
-		glRotatef(g_vLandRotate[0], 1.0, 0.0, 0.0);
-		glRotatef(g_vLandRotate[1], 0.0, 1.0, 0.0);
-		glRotatef(g_vLandRotate[2], 0.0, 0.0, 1.0);
-		glScalef(g_vLandScale[0], g_vLandScale[1], g_vLandScale[2]);
-	}
-
-	//glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-	glEnable(GL_TEXTURE_2D);
-	glBegin(GL_POLYGON);
-	glTexCoord2f(width, length);
-	glVertex3f(xMax, yMax, hMin);
-	glTexCoord2f(0.0, length);
-	glVertex3f(xMin, yMax, hMin);
-	glTexCoord2f(0.0, 0.0);
-	glVertex3f(xMin, yMin, hMin);
-	glTexCoord2f(width, 0.0);
-	glVertex3f(xMax, yMin, hMin);
-	glEnd();
-	glDisable(GL_TEXTURE_2D);
-
-	//render with cubes
-	glColor3f(0.4f, 0.4f, 0.4f);
-	for (int i = 0; i < (g_Splines->numControlPoints - 3) * 1000; i++)
-		drawCube(i);
-
-	//render with lines
-	/*glLineWidth(3.0f);
-	glBegin(GL_LINE_STRIP);
-	for (int i = 0; i < (g_Splines->numControlPoints - 3) * 1000 + 1; i++) {
-		glColor3f(1.0f * i / ((g_Splines->numControlPoints - 3) * 1000), 0.0f, 1.0f);
-		glVertex3f(rail[i].x, rail[i].y, rail[i].z);
-	}
-	glEnd();*/
-
-	glutSwapBuffers();
-}
-
-void reshape(int w, int h) {
-	GLfloat aspect = (GLfloat)w / (GLfloat)h;
-	glViewport(0, 0, w, h);
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	gluPerspective(60.0, aspect, 0.01, 100.0);
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-}
-
-void doIdle() {
-	//control moving speed
-	float speed = std::max(5.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
-	position += speed;
-	if (position > (g_Splines->numControlPoints - 3) * 1000)
-		position = 0;
-	/* update screen */
-	glutPostRedisplay();
-}
-
-void mousedrag(int x, int y) {
-	int vMouseDelta[2] = { x - g_vMousePos[0], y - g_vMousePos[1] };
-
-	switch (g_ControlState) {
-	case CONTROLSTATE::TRANSLATE:
-		if (g_iLeftMouseButton) {
-			g_vLandTranslate[0] += vMouseDelta[0] * 0.1;
-			g_vLandTranslate[1] -= vMouseDelta[1] * 0.1;
-		}
-		if (g_iMiddleMouseButton) {
-			g_vLandTranslate[2] += vMouseDelta[1] * 0.1;
-		}
-		break;
-	case CONTROLSTATE::ROTATE:
-		if (g_iLeftMouseButton) {
-			g_vLandRotate[0] += vMouseDelta[1];
-			g_vLandRotate[1] += vMouseDelta[0];
-		}
-		if (g_iMiddleMouseButton) {
-			g_vLandRotate[2] += vMouseDelta[1];
-		}
-		break;
-	case CONTROLSTATE::SCALE:
-		if (g_iLeftMouseButton) {
-			g_vLandScale[0] *= 1.0 + vMouseDelta[0] * 0.01;
-			g_vLandScale[1] *= 1.0 - vMouseDelta[1] * 0.01;
-		}
-		if (g_iMiddleMouseButton) {
-			g_vLandScale[2] *= 1.0 - vMouseDelta[1] * 0.01;
-		}
-		break;
-	}
-	g_vMousePos[0] = x;
-	g_vMousePos[1] = y;
-}
-
-void mouseidle(int x, int y) {
-	g_vMousePos[0] = x;
-	g_vMousePos[1] = y;
-}
-
-void mousebutton(int button, int state, int x, int y) {
-	switch (button) {
-	case GLUT_LEFT_BUTTON:
-		g_iLeftMouseButton = (state == GLUT_DOWN);
-		break;
-	case GLUT_MIDDLE_BUTTON:
-		g_iMiddleMouseButton = (state == GLUT_DOWN);
-		break;
-	case GLUT_RIGHT_BUTTON:
-		g_iRightMouseButton = (state == GLUT_DOWN);
-		break;
-	}
-
-	switch (glutGetModifiers()) {
-	case GLUT_ACTIVE_CTRL:
-		g_ControlState = CONTROLSTATE::TRANSLATE;
-		printf("Translating\n");
-		break;
-	case GLUT_ACTIVE_SHIFT:
-		g_ControlState = CONTROLSTATE::SCALE;
-		printf("Scaling\n");
-		break;
-	case GLUT_ACTIVE_ALT:
-		g_ControlState = CONTROLSTATE::ROTATE;
-		printf("Rotating\n");
-		break;
-	}
-
-	g_vMousePos[0] = x;
-	g_vMousePos[1] = y;
-}
-
-void keyboard(unsigned char key, int x, int y) {
-	switch (key) {	//use keyboard to change the rendering method
-	case 'v':
-	case 'V':
-		printf("rail overview");
-		g_ViewState = VIEWSTATE::OVERVIEW;
-		break;
-	case 'r':
-	case 'R':
-		printf("ride on");
-		g_ViewState = VIEWSTATE::RIDE;
-		break;
-	case 'q':
-		exit(0);
-		break;
-	}
-}
 
 int _tmain(int argc, _TCHAR* argv[]) {
 	// I've set the argv[1] to track.txt.
