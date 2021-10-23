@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <iostream>
 #include <algorithm>
+#include <vector>
 #include <GL/glu.h>
 #include <GL/glut.h>
 
@@ -24,7 +25,7 @@
 
 /* Object where you can load an image */
 cv::Mat3b groundBGR;
-cv::Mat3b skyBGR;
+cv::Mat3b sky[6];	//back, bottom, front, left, right, top
 
 struct spaceVector {
 	double x;
@@ -33,10 +34,15 @@ struct spaceVector {
 
 	spaceVector(const double x0 = 0, const double y0 = 0, const double z0 = 0) : x(x0), y(y0), z(z0) {}
 
-	inline spaceVector operator+(const spaceVector& v0) { return spaceVector( x + v0.x , y + v0.y, z + v0.z ); }
-	inline spaceVector operator-(const spaceVector& v0) { return spaceVector( x - v0.x , y - v0.y, z - v0.z ); }
-	inline spaceVector operator*(const int num) { return spaceVector( x * num , y * num, z * num ); }
-	inline spaceVector operator*(const float num) { return spaceVector( x * num , y * num, z * num ); }
+	inline spaceVector operator+(const spaceVector& v0) { return spaceVector(x + v0.x, y + v0.y, z + v0.z); }
+	inline spaceVector operator-(const spaceVector& v0) { return spaceVector(x - v0.x, y - v0.y, z - v0.z); }
+	inline spaceVector operator*(const int num) { return spaceVector(x * num, y * num, z * num); }
+	inline spaceVector operator*(const float num) { return spaceVector(x * num, y * num, z * num); }
+
+	/*inline spaceVector& operator+(const spaceVector& v0) { x += v0.x, y += v0.y, z += v0.z; return *this; }
+	inline spaceVector& operator-(const spaceVector& v0) { x -= v0.x, y -= v0.y, z -= v0.z; return *this; }
+	inline spaceVector& operator*(const int num) { x *= num, y *= num, z *= num; return *this; }
+	inline spaceVector& operator*(const float num) { x *= num, y *= num, z *= num; return *this; }*/
 };
 
 /* represents one control point along the spline */
@@ -47,8 +53,9 @@ struct point {
 
 	point(const double x0 = 0, const double y0 = 0, const double z0 = 0) : x(x0), y(y0), z(z0) {}
 
-	inline point operator+(const spaceVector& v0) { return point( x + v0.x , y + v0.y, z + v0.z ); }
-	inline spaceVector operator-(const point& p0) { return spaceVector( x - p0.x , y - p0.y, z - p0.z ); }
+	inline point operator+(const spaceVector& v0) { return point(x + v0.x, y + v0.y, z + v0.z); }
+	inline point& operator+=(const spaceVector& v0) { x += v0.x, y += v0.y, z += v0.z; return *this; }
+	inline spaceVector operator-(const point& p0) const { return spaceVector(x - p0.x, y - p0.y, z - p0.z); }
 };
 
 /* spline struct which contains how many control points, and an array of control points */
@@ -61,6 +68,8 @@ int windowWidth = 640;
 int windowHeight = 480;
 
 int position = 0;
+float driveSpeed = 0.0f;
+float acceleration = 1.0f;
 
 //spline related variable
 /* the spline array */
@@ -69,9 +78,19 @@ struct spline* g_Splines;
 /* total number of splines */
 int g_iNumOfSplines;
 
+int len = 0;//total rail points
+
+// store all points on the curve
+point* rail;
+spaceVector* railTangent;
+spaceVector* railNormal;
+spaceVector* railBinormal;
+float* railDerivative;
+
 //check boundary
 double hMax = 0.0;
-float hMin = 100.0f, xMax = -100.0f, xMin = 100.0f, yMax = -100.0f, yMin = 100.0f;
+float hMin = 100.0f, xMax = -100.0f, xMin = 100.0f, xMid = 0.0f;
+float yMax = -100.0f, yMin = 100.0f, yMid = 0.0f;
 float width = 0.0f, length = 0.0f;
 
 float s = 0.5f;
@@ -80,11 +99,7 @@ float basisMatrix[16] = { -s, 2.0f - s, s - 2.0f, s,
 										-s, 0.0f, s, 0.0f,
 										0.0f, 1.0f, 0.0f, 0.0f };
 
-point* rail; // store all points on the curve
-spaceVector* railTangent;
-spaceVector* railNormal;
-spaceVector* railBinormal;
-float* railDerivative;
+int g_iMenuId;
 
 // transformation variable
 float g_vLandRotate[3] = { 0.0f, 0.0f, 0.0f };
@@ -95,21 +110,20 @@ int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
 int g_iMiddleMouseButton = 0;
 int g_iRightMouseButton = 0;
 
+//states
 enum class CONTROLSTATE { ROTATE, TRANSLATE, SCALE };
 CONTROLSTATE g_ControlState = CONTROLSTATE::ROTATE;
 
-enum class VIEWSTATE { RIDE, STOP, OVERVIEW };
-VIEWSTATE g_ViewState = VIEWSTATE::RIDE;
+enum class VIEWSTATE { AUTO, DRIVE, STOP, OVERVIEW };
+VIEWSTATE g_ViewState = VIEWSTATE::AUTO;
 
 enum class RAILSTATE { TSHAPE, SQUARE };
 RAILSTATE g_RailState = RAILSTATE::SQUARE;
 
-GLuint texture;
+GLuint texture[7];
 
-inline spaceVector crossProduct(spaceVector& u, spaceVector& v) {
-	return spaceVector{ u.y * v.z - u.z * v.y,
-					   u.z * v.x - u.x * v.z,
-					   u.x * v.y - u.y * v.x };
+inline void crossProduct(const spaceVector& u, const spaceVector& v, spaceVector& result) {
+	result.x = u.y * v.z - u.z * v.y, result.y = u.z * v.x - u.x * v.z, result.z = u.x * v.y - u.y * v.x;
 }
 
 void normalize(spaceVector& u) {
@@ -186,69 +200,135 @@ float* matrixMultiplication(float* m1, float* m2, int m1Col, int m1Row, int m2Co
 	return result;
 }
 
-void buildSpline(point c1, point c2, point c3, point c4, int now) {
-	float controlMatrix[12] = { c1.x, c1.y, c1.z,
-												c2.x, c2.y, c2.z,
-												c3.x, c3.y, c3.z,
-												c4.x, c4.y, c4.z };
-	float* splineMatrix = matrixMultiplication(basisMatrix, controlMatrix, 4, 4, 4, 3);
+void Subdivide(float u0, float u1, float* splineMatrix, const point& c1, const point& c4) {
+	float umid = (u0 + u1) / 2.0f;
+	float	uMatrix[4] = { static_cast<float>(pow(umid, 3)), static_cast<float>(pow(umid, 2)), umid, 1.0f };
+	float* result = matrixMultiplication(uMatrix, splineMatrix, 1, 4, 4, 3);
 
-	float uMatrix[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-	float uTangentMatrix[4] = { 0.0f, 0.0f, 1.0, 0.0f };
-	float* result = nullptr;
-	for (int i = 0; i < 1001; i++) {
-		uMatrix[0] = pow(0.001 * i, 3), uMatrix[1] = pow(0.001 * i, 2), uMatrix[2] = 0.001 * i;
-		uTangentMatrix[0] = 3 * pow(0.001 * i, 2), uTangentMatrix[1] = 2 * 0.001 * i;
-		//compute curve
+	bool drawing = false;
+	if (u1 - u0 > 0.002f) {
+		point p = point(c1.x, c1.y, c1.z);
+		p += (c4 - c1) * umid;
+		if (sqrt(pow(p.x - result[0], 2) + pow(p.y - result[1], 2) + pow(p.z - result[2], 2)) > 0.05) {
+			delete[] result;
+			Subdivide(u0, umid, splineMatrix, c1, c4);
+			Subdivide(umid, u1, splineMatrix, c1, c4);
+		}
+		else
+			drawing = true;
+	}
+	else
+		drawing = true;
+
+	if (drawing) {
+		delete[] result;
+
+		float uTangentMatrix[4] = { 0.0f, 0.0f, 1.0, 0.0f };
+		//curve point
+		uMatrix[0] = pow(u0, 3), uMatrix[1] = pow(u0, 2), uMatrix[2] = u0;
 		result = matrixMultiplication(uMatrix, splineMatrix, 1, 4, 4, 3);
-		rail[now * 1000 + i] = point{ result[0], result[1], result[2] };
+		rail[len].x = result[0], rail[len].y = result[1], rail[len].z = result[2];
 
-		//find boundary point
+		//find boundary
 		if (hMax < result[2]) { hMax = result[2]; }
 		if (hMin > result[2]) { hMin = result[2]; }
 		if (xMax < result[0]) { xMax = result[0]; }
 		if (xMin > result[0]) { xMin = result[0]; }
 		if (yMax < result[1]) { yMax = result[1]; }
 		if (yMin > result[1]) { yMin = result[1]; }
+		delete[] result;
 
+		//compute tangent
+		uTangentMatrix[0] = 3 * pow(u0, 2), uTangentMatrix[1] = 2 * u0;
+		result = matrixMultiplication(uTangentMatrix, splineMatrix, 1, 4, 4, 3);
+		railTangent[len].x = result[0], railTangent[len].y = result[1], railTangent[len].z = result[2];
+		normalize(railTangent[len]);
+		railDerivative[len] = sqrt(pow(result[0], 2) + pow(result[1], 2) + pow(result[2], 2));
+		delete[] result;
+
+		//compute normal
+		crossProduct(railBinormal[len], railTangent[len], railNormal[len]);
+		normalize(railNormal[len]);
+
+		//computer binormal
+		crossProduct(railTangent[len], railNormal[len], railBinormal[len + 1]);
+		normalize(railBinormal[len + 1]);
+
+		len++;
+	}
+}
+
+void buildSpline(const point& c1, const point& c2, const point& c3, const point& c4, bool last) {
+	float controlMatrix[12] = { c1.x, c1.y, c1.z,
+												c2.x, c2.y, c2.z,
+												c3.x, c3.y, c3.z,
+												c4.x, c4.y, c4.z };
+	float* splineMatrix = matrixMultiplication(basisMatrix, controlMatrix, 4, 4, 4, 3);
+
+	//draw curve
+	Subdivide(0.0f, 1.0f, splineMatrix, c1, c4);
+
+	if (last) {
+		//draw c4
+		float uMatrix[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float uTangentMatrix[4] = { 3.0f, 2.0f, 1.0, 0.0f };
+		float* result = matrixMultiplication(uMatrix, splineMatrix, 1, 4, 4, 3);
+		rail[len].x = result[0], rail[len].y = result[1], rail[len].z = result[2];
+
+		//find boundary
+		if (hMax < result[2]) { hMax = result[2]; }
+		if (hMin > result[2]) { hMin = result[2]; }
+		if (xMax < result[0]) { xMax = result[0]; }
+		if (xMin > result[0]) { xMin = result[0]; }
+		if (yMax < result[1]) { yMax = result[1]; }
+		if (yMin > result[1]) { yMin = result[1]; }
 		delete[] result;
 
 		//compute tangent
 		result = matrixMultiplication(uTangentMatrix, splineMatrix, 1, 4, 4, 3);
-		railTangent[now * 1000 + i] = spaceVector{ result[0], result[1], result[2] };
-		normalize(railTangent[now * 1000 + i]);
-		railDerivative[now * 1000 + i] = sqrt(pow(result[0], 2) + pow(result[1], 2) + pow(result[2], 2));
+		railTangent[len].x = result[0], railTangent[len].y = result[1], railTangent[len].z = result[2];
+		normalize(railTangent[len]);
+		railDerivative[len] = sqrt(pow(result[0], 2) + pow(result[1], 2) + pow(result[2], 2));
 		delete[] result;
 
 		//compute normal
-		railNormal[now * 1000 + i] = crossProduct(railBinormal[now * 1000 + i], railTangent[now * 1000 + i]);
-		normalize(railNormal[now * 1000 + i]);
+		crossProduct(railBinormal[len], railTangent[len], railNormal[len]);
+		normalize(railNormal[len]);
 
 		//computer binormal
-		railBinormal[now * 1000 + i + 1] = crossProduct(railTangent[now * 1000 + i], railNormal[now * 1000 + i]);
-		normalize(railBinormal[now * 1000 + i + 1]);
+		crossProduct(railTangent[len], railNormal[len], railBinormal[len + 1]);
+		normalize(railBinormal[len + 1]);
+
+		len++;
 	}
+
 	delete[] splineMatrix;
 }
 
-void textureInit(cv::Mat3b& image) {
-	glGenTextures(1, &texture);
-	glBindTexture(GL_TEXTURE_2D, texture);
-
+void textureInit() {
+	glGenTextures(7, texture);
+	//ground
+	glBindTexture(GL_TEXTURE_2D, texture[0]);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 1024, 1024, GL_RGB, GL_UNSIGNED_BYTE, groundBGR.data);
 
-	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 1024, 1024, GL_RGB, GL_UNSIGNED_BYTE, image.data);
-	//glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1024, 1024, 0, GL_RGB, GL_UNSIGNED_BYTE, image.data);
+	for (int i = 1; i < 7; i++) {
+		glBindTexture(GL_TEXTURE_2D, texture[i]);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 2048, 2048, 0, GL_RGB, GL_UNSIGNED_BYTE, sky[i-1].data);
+	}
 }
 
 void myinit() {
 	glClearColor(0.0, 0.0, 0.0, 0.0);
-	glEnable(GL_DEPTH_TEST);
 	glShadeModel(GL_SMOOTH);
+	glEnable(GL_DEPTH_TEST);
 
 	//light settings
 	glEnable(GL_LIGHTING);
@@ -268,24 +348,33 @@ void myinit() {
 	railNormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
 	railBinormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 2];
 
-	railBinormal[0] = crossProduct(g_Splines->points[1] - g_Splines->points[0], spaceVector{ 0.0, 0.0,1.0 });
+	crossProduct(g_Splines->points[1] - g_Splines->points[0], spaceVector{ 0.0, 0.0,1.0 }, railBinormal[0]);
 
-	for (int i = 0; i < g_Splines->numControlPoints - 3; i++) {
+	for (int i = 0; i < g_Splines->numControlPoints - 4; i++) {
 		buildSpline(g_Splines->points[i],
 					g_Splines->points[i + 1],
 					g_Splines->points[i + 2],
-					g_Splines->points[i + 3], i);
+					g_Splines->points[i + 3], false);
 	}
+	//last spline
+	buildSpline(g_Splines->points[g_Splines->numControlPoints - 4],
+				g_Splines->points[g_Splines->numControlPoints - 3],
+				g_Splines->points[g_Splines->numControlPoints - 2],
+				g_Splines->points[g_Splines->numControlPoints - 1], true);
+
+	printf("size:	%d\n", (g_Splines->numControlPoints - 3) * 1000 + 1);
+	printf("len:	%d\n", len);
 
 	//set boundary
-	hMin -= 1.0f, xMin -= 5.0f, yMin -= 5.0f, xMax += 5.0f, yMax += 5.0f;
+	xMid = (xMax + xMin) / 2.0f, yMid = (yMax + yMin) / 2.0f;
 	width = xMax - xMin, length = yMax - yMin;
 	width = width < length ? length : width;
-
-	textureInit(groundBGR);
+	hMin -= 1.0f;
+	
+	textureInit();
 }
 
-void drawFace(int v1, int v2, int v3, int v4, point vertices[8], spaceVector& normal) {
+void drawFace(int v1, int v2, int v3, int v4, point vertices[8], const spaceVector& normal) {
 	glNormal3f(normal.x, normal.y, normal.z);
 	glBegin(GL_POLYGON);
 	glVertex3f(vertices[v1].x, vertices[v1].y, vertices[v1].z);
@@ -353,32 +442,32 @@ void drawCube(int i) {
 	}
 	else if (g_RailState == RAILSTATE::TSHAPE) {
 		//main rail
-		float alpha = 0.002f, gamma=0.0002f;
+		float alpha = 0.002f, gamma = 0.0016f;
 		point verticesHorizontal[8] = {
-			{rail[i + 1].x + gamma * -railNormal[i + 1].x - alpha * railBinormal[i + 2].x,
-			 rail[i + 1].y + gamma * -railNormal[i + 1].y - alpha * railBinormal[i + 2].y,
-			 rail[i + 1].z + gamma * -railNormal[i + 1].z - alpha * railBinormal[i + 2].z },
+			{rail[i + 1].x + alpha * -railNormal[i + 1].x - alpha * railBinormal[i + 2].x,
+			 rail[i + 1].y + alpha * -railNormal[i + 1].y - alpha * railBinormal[i + 2].y,
+			 rail[i + 1].z + alpha * -railNormal[i + 1].z - alpha * railBinormal[i + 2].z },
+			{rail[i + 1].x + alpha * -railNormal[i + 1].x + alpha * railBinormal[i + 2].x,
+			 rail[i + 1].y + alpha * -railNormal[i + 1].y + alpha * railBinormal[i + 2].y,
+			 rail[i + 1].z + alpha * -railNormal[i + 1].z + alpha * railBinormal[i + 2].z },
 			{rail[i + 1].x + gamma * -railNormal[i + 1].x + alpha * railBinormal[i + 2].x,
 			 rail[i + 1].y + gamma * -railNormal[i + 1].y + alpha * railBinormal[i + 2].y,
 			 rail[i + 1].z + gamma * -railNormal[i + 1].z + alpha * railBinormal[i + 2].z },
-			{rail[i + 1].x + gamma * railNormal[i + 1].x + alpha * railBinormal[i + 2].x,
-			 rail[i + 1].y + gamma * railNormal[i + 1].y + alpha * railBinormal[i + 2].y,
-			 rail[i + 1].z + gamma * railNormal[i + 1].z + alpha * railBinormal[i + 2].z },
-			{rail[i + 1].x + gamma * railNormal[i + 1].x - alpha * railBinormal[i + 2].x,
-			 rail[i + 1].y + gamma * railNormal[i + 1].y - alpha * railBinormal[i + 2].y,
-			 rail[i + 1].z + gamma * railNormal[i + 1].z - alpha * railBinormal[i + 2].z },
-			{rail[i].x + gamma * -railNormal[i].x - alpha * railBinormal[i + 1].x,
-			 rail[i].y + gamma * -railNormal[i].y - alpha * railBinormal[i + 1].y,
-			 rail[i].z + gamma * -railNormal[i].z - alpha * railBinormal[i + 1].z },
+			{rail[i + 1].x + gamma * -railNormal[i + 1].x - alpha * railBinormal[i + 2].x,
+			 rail[i + 1].y + gamma * -railNormal[i + 1].y - alpha * railBinormal[i + 2].y,
+			 rail[i + 1].z + gamma * -railNormal[i + 1].z - alpha * railBinormal[i + 2].z },
+			{rail[i].x + alpha * -railNormal[i].x - alpha * railBinormal[i + 1].x,
+			 rail[i].y + alpha * -railNormal[i].y - alpha * railBinormal[i + 1].y,
+			 rail[i].z + alpha * -railNormal[i].z - alpha * railBinormal[i + 1].z },
+			{rail[i].x + alpha * -railNormal[i].x + alpha * railBinormal[i + 1].x,
+			 rail[i].y + alpha * -railNormal[i].y + alpha * railBinormal[i + 1].y,
+			 rail[i].z + alpha * -railNormal[i].z + alpha * railBinormal[i + 1].z },
 			{rail[i].x + gamma * -railNormal[i].x + alpha * railBinormal[i + 1].x,
 			 rail[i].y + gamma * -railNormal[i].y + alpha * railBinormal[i + 1].y,
 			 rail[i].z + gamma * -railNormal[i].z + alpha * railBinormal[i + 1].z },
-			{rail[i].x + gamma * railNormal[i].x + alpha * railBinormal[i + 1].x,
-			 rail[i].y + gamma * railNormal[i].y + alpha * railBinormal[i + 1].y,
-			 rail[i].z + gamma * railNormal[i].z + alpha * railBinormal[i + 1].z },
-			{rail[i].x + gamma * railNormal[i].x - alpha * railBinormal[i + 1].x,
-			 rail[i].y + gamma * railNormal[i].y - alpha * railBinormal[i + 1].y,
-			 rail[i].z + gamma * railNormal[i].z - alpha * railBinormal[i + 1].z },
+			{rail[i].x + gamma * -railNormal[i].x - alpha * railBinormal[i + 1].x,
+			 rail[i].y + gamma * -railNormal[i].y - alpha * railBinormal[i + 1].y,
+			 rail[i].z + gamma * -railNormal[i].z - alpha * railBinormal[i + 1].z },
 		};
 
 		drawFace(2, 3, 7, 6, verticesHorizontal, railNormal[i]);
@@ -386,7 +475,7 @@ void drawCube(int i) {
 		drawFace(1, 2, 6, 5, verticesHorizontal, railBinormal[i]);
 		drawFace(0, 1, 5, 4, verticesHorizontal, railNormal[i] * -1);
 
-		alpha = 0.0002f, gamma = 0.002f;
+		alpha = 0.0004f, gamma = 0.002f;
 		point verticesVertical[8] = {
 			{rail[i + 1].x + gamma * -railNormal[i + 1].x - alpha * railBinormal[i + 2].x,
 			 rail[i + 1].y + gamma * -railNormal[i + 1].y - alpha * railBinormal[i + 2].y,
@@ -448,6 +537,41 @@ void drawCube(int i) {
 	}
 }
 
+void drawSkybox(int v1, int v2, int v3, int v4, point vertices[8], const spaceVector& normal) {
+	glNormal3f(normal.x, normal.y, normal.z);
+	glBegin(GL_POLYGON);
+	glTexCoord2f(0.0f, 0.0f);
+	glVertex3f(vertices[v1].x, vertices[v1].y, vertices[v1].z);
+	glTexCoord2f(0.0f, 1.0f);
+	glVertex3f(vertices[v2].x, vertices[v2].y, vertices[v2].z);
+	glTexCoord2f(1.0f, 1.0f);
+	glVertex3f(vertices[v3].x, vertices[v3].y, vertices[v3].z);
+	glTexCoord2f(1.0f, 0.0f);
+	glVertex3f(vertices[v4].x, vertices[v4].y, vertices[v4].z);
+	glEnd();
+}
+
+void skyBox() {
+	float x = width + 5.0f, y = width + 5.0f, z = width + 5.0f;
+	point vertices[8] = {
+		point(-x, y, -z), point(-x, y, z), point(x, y, z), point(x, y, -z),
+		point(-x, -y, -z), point(-x, -y, z),point(x, -y, z), point(x, -y, -z)
+	};
+	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	glBindTexture(GL_TEXTURE_2D, texture[1]);	//back
+	drawSkybox(1, 0, 3, 2, vertices, spaceVector{ 0,-1,0 });
+	glBindTexture(GL_TEXTURE_2D, texture[4]);	//left
+	drawSkybox(2, 3, 7, 6, vertices, spaceVector{ -1,0,0 });
+	glBindTexture(GL_TEXTURE_2D, texture[2]);	//bottom
+	drawSkybox(7, 3, 0, 4, vertices, spaceVector{ 0,0,1 });
+	glBindTexture(GL_TEXTURE_2D, texture[6]);	//top
+	drawSkybox(2, 6, 5, 1, vertices, spaceVector{ 0,0,-1 });
+	glBindTexture(GL_TEXTURE_2D, texture[3]); // front
+	drawSkybox(6, 7, 4, 5, vertices, spaceVector{ 0,1,0 });
+	glBindTexture(GL_TEXTURE_2D, texture[5]); //right 
+	drawSkybox( 5, 4, 0, 1, vertices, spaceVector{ 1,0,0 });
+}
+
 void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -478,29 +602,32 @@ void display() {
 
 	//ground plane
 	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, texture[0]);
 	glNormal3f(0.0f, 0.0f, 1.0f);
 	glBegin(GL_POLYGON);
 	glTexCoord2f(width, length);
-	glVertex3f(xMin + width, yMin + width, hMin);
+	glVertex3f(xMid + width, yMid + width, hMin);
 	glTexCoord2f(0.0, length);
-	glVertex3f(xMin, yMin + width, hMin);
+	glVertex3f(xMid - width, yMid + width, hMin);
 	glTexCoord2f(0.0, 0.0);
-	glVertex3f(xMin, yMin, hMin);
+	glVertex3f(xMid - width, yMid - width, hMin);
 	glTexCoord2f(width, 0.0);
-	glVertex3f(xMin + width, yMin, hMin);
+	glVertex3f(xMid + width, yMid - width, hMin);
 	glEnd();
+
+	skyBox();
 	glDisable(GL_TEXTURE_2D);
 
 	GLfloat mat_a[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	GLfloat mat_d[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	GLfloat mat_s[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	GLfloat low_sh[] = { 5.0f };
+	GLfloat mat_d[] = { 0.35f, 0.38f, 0.4f, 1.0f };
+	GLfloat mat_s[] = { 0.35f, 0.38f, 0.4f, 1.0f };
+	GLfloat low_sh[] = { 10.0f };
 	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a);
 	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d);
 	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s);
 	glMaterialfv(GL_FRONT, GL_SHININESS, low_sh);
 
-	for (int i = 0; i < (g_Splines->numControlPoints - 3) * 1000; i++)
+	for (int i = 0; i < len - 1; i++)
 		drawCube(i);
 
 	glutSwapBuffers();
@@ -518,13 +645,23 @@ void reshape(int w, int h) {
 
 void doIdle() {
 	//control moving speed
-	if (g_ViewState == VIEWSTATE::RIDE) {
-		float speed = 20.0f;
+	if (g_ViewState == VIEWSTATE::AUTO) {
+		driveSpeed = 10.0f;
 		if (railDerivative[position] != 0)
-			speed = std::max(20.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
-		position += speed;
-		if (position > (g_Splines->numControlPoints - 3) * 1000)
+			driveSpeed = std::max(10.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
+		position += driveSpeed;
+		if (position > len)
 			position = 0;
+	}
+	else if (g_ViewState == VIEWSTATE::DRIVE) {
+		driveSpeed -= 0.1f;
+		driveSpeed = std::max(driveSpeed, 0.0f);
+		position += driveSpeed;
+		if (position > len)
+			position = 0;
+	}
+	else if (g_ViewState == VIEWSTATE::STOP) {
+		driveSpeed = 0.0f;
 	}
 	/* update screen */
 	glutPostRedisplay();
@@ -536,11 +673,11 @@ void mousedrag(int x, int y) {
 	switch (g_ControlState) {
 	case CONTROLSTATE::TRANSLATE:
 		if (g_iLeftMouseButton) {
-			g_vLandTranslate[0] += vMouseDelta[0] * 0.005;
-			g_vLandTranslate[1] -= vMouseDelta[1] * 0.005;
+			g_vLandTranslate[0] += vMouseDelta[0] * 0.05;
+			g_vLandTranslate[1] -= vMouseDelta[1] * 0.05;
 		}
 		if (g_iMiddleMouseButton) {
-			g_vLandTranslate[2] += vMouseDelta[1] * 0.005;
+			g_vLandTranslate[2] += vMouseDelta[1] * 0.05;
 		}
 		break;
 	case CONTROLSTATE::ROTATE:
@@ -592,35 +729,58 @@ void mousebutton(int button, int state, int x, int y) {
 
 void keyboard(unsigned char key, int x, int y) {
 	switch (key) {	//use keyboard to change the rendering method
+	case 'a':
+	case 'A':
+		printf("Self driving\n");
+		g_ViewState = VIEWSTATE::AUTO;
+		break;
+	case 'd':
+	case 'D':
+		printf("Driving\n");
+		g_ViewState = VIEWSTATE::DRIVE;
+		break;
 	case 'v':
 	case 'V':
-		printf("rail overview");
+		printf("Rail overview\n");
 		std::fill(g_vLandRotate, g_vLandRotate + 3, 0.0f);
 		std::fill(g_vLandTranslate, g_vLandTranslate + 3, 0.0f);
 		g_ViewState = VIEWSTATE::OVERVIEW;
 		break;
-	case 'r':
-	case 'R':
-		printf("ride on");
-		g_ViewState = VIEWSTATE::RIDE;
-		break;
 	case 'p':
 	case 'P':
-		printf("pause");
+		printf("Pause\n");
 		g_ViewState = VIEWSTATE::STOP;
-		break;
-	case 't':
-	case 'T':
-		printf("tshape rail");
-		g_RailState = RAILSTATE::TSHAPE;
-		break;
-	case 's':
-	case 'S':
-		printf("square");
-		g_RailState = RAILSTATE::SQUARE;
 		break;
 	case 'q':
 		exit(0);
+		break;
+	}
+}
+
+void specialKeyboard(int key, int x, int y) {
+	switch (key) {
+	case GLUT_KEY_UP:
+		if (g_ViewState == VIEWSTATE::DRIVE) {
+			driveSpeed += acceleration;
+			driveSpeed = std::min(driveSpeed, 20.0f);
+		}
+		break;
+	case GLUT_KEY_DOWN:
+		if (g_ViewState == VIEWSTATE::DRIVE) {
+			driveSpeed -= acceleration;
+			driveSpeed = std::min(driveSpeed, 20.0f);
+		}
+		break;
+	}
+}
+
+void menufunc(int value) {
+	switch (value) {	//control coloring status
+	case 0:
+		g_RailState = RAILSTATE::SQUARE;
+		break;
+	case 1:
+		g_RailState = RAILSTATE::TSHAPE;
 		break;
 	}
 }
@@ -726,6 +886,12 @@ int _tmain(int argc, _TCHAR* argv[]) {
 	// If you need to load textures use below instead of pic library:
 	//readImage("spiral.jpg", imageBGR, false);
 	readImage("texture/ground.jpg", groundBGR, false);
+	readImage("texture/skybox/back.jpg", sky[0], false);
+	readImage("texture/skybox/bottom.jpg", sky[1], false);
+	readImage("texture/skybox/front.jpg", sky[2], false);
+	readImage("texture/skybox/left.jpg", sky[3], false);
+	readImage("texture/skybox/right.jpg", sky[4], false);
+	readImage("texture/skybox/top.jpg", sky[5], false);
 
 	// Demonstrates to loop across image and access pixel values:
 	// Note this function doesn't do anything, but you may find it useful:
@@ -746,6 +912,13 @@ int _tmain(int argc, _TCHAR* argv[]) {
 	glutDisplayFunc(display);
 	glutReshapeFunc(reshape);
 
+	//menu
+	g_iMenuId = glutCreateMenu(menufunc);
+	glutSetMenu(g_iMenuId);
+	glutAddMenuEntry("Square rail", 0);
+	glutAddMenuEntry("Tshape rail", 1);
+	glutAttachMenu(GLUT_RIGHT_BUTTON);
+
 	glutIdleFunc(doIdle);
 
 	/* callbacks */
@@ -753,6 +926,7 @@ int _tmain(int argc, _TCHAR* argv[]) {
 	glutPassiveMotionFunc(mouseidle);
 	glutMouseFunc(mousebutton);
 	glutKeyboardFunc(keyboard);
+	glutSpecialFunc(specialKeyboard);
 
 	/* initialization */
 	myinit();
