@@ -27,6 +27,8 @@
 cv::Mat3b groundBGR;
 cv::Mat3b sky[6];	//back, bottom, front, left, right, top
 
+GLuint texture[7];
+
 struct spaceVector {
 	double x;
 	double y;
@@ -36,13 +38,18 @@ struct spaceVector {
 
 	inline spaceVector operator+(const spaceVector& v0) { return spaceVector(x + v0.x, y + v0.y, z + v0.z); }
 	inline spaceVector operator-(const spaceVector& v0) { return spaceVector(x - v0.x, y - v0.y, z - v0.z); }
-	inline spaceVector operator*(const int num) { return spaceVector(x * num, y * num, z * num); }
-	inline spaceVector operator*(const float num) { return spaceVector(x * num, y * num, z * num); }
+	inline spaceVector operator*(int num) { return spaceVector(x * num, y * num, z * num); }
+	inline spaceVector operator*(float num) { return spaceVector(x * num, y * num, z * num); }
 
-	/*inline spaceVector& operator+(const spaceVector& v0) { x += v0.x, y += v0.y, z += v0.z; return *this; }
-	inline spaceVector& operator-(const spaceVector& v0) { x -= v0.x, y -= v0.y, z -= v0.z; return *this; }
-	inline spaceVector& operator*(const int num) { x *= num, y *= num, z *= num; return *this; }
-	inline spaceVector& operator*(const float num) { x *= num, y *= num, z *= num; return *this; }*/
+	inline spaceVector& operator+=(const spaceVector& v0) { x += v0.x, y += v0.y, z += v0.z; return *this; }
+	inline spaceVector& operator-=(const spaceVector& v0) { x -= v0.x, y -= v0.y, z -= v0.z; return *this; }
+	inline spaceVector& operator*=(int num) { x *= num, y *= num, z *= num; return *this; }
+	inline spaceVector& operator*=(float num) { x *= num, y *= num, z *= num; return *this; }
+
+	void normalize() {
+		float scalar = sqrt(pow(x, 2) + pow(y, 2) + pow(z, 2));
+		x /= scalar, y /= scalar, z /= scalar;
+	}
 };
 
 /* represents one control point along the spline */
@@ -64,12 +71,8 @@ struct spline {
 	struct point* points;
 };
 
-int windowWidth = 640;
-int windowHeight = 480;
-
-int position = 0;
-float driveSpeed = 0.0f;
-float acceleration = 1.0f;
+//window size
+int windowWidth = 640, windowHeight = 480;
 
 //spline related variable
 /* the spline array */
@@ -78,7 +81,11 @@ struct spline* g_Splines;
 /* total number of splines */
 int g_iNumOfSplines;
 
-int len = 0;//total rail points
+float s = 0.5f;
+float basisMatrix[16] = { -s, 2.0f - s, s - 2.0f, s,
+										2.0f * s, s - 3.0f, 3.0f - 2.0f * s, -s,
+										-s, 0.0f, s, 0.0f,
+										0.0f, 1.0f, 0.0f, 0.0f };
 
 // store all points on the curve
 point* rail;
@@ -87,23 +94,27 @@ spaceVector* railNormal;
 spaceVector* railBinormal;
 float* railDerivative;
 
+int len = 0;	//total rail points
+int* node;		//cumulative points of each segment
+
 //check boundary
 double hMax = 0.0;
 float hMin = 100.0f, xMax = -100.0f, xMin = 100.0f, xMid = 0.0f;
 float yMax = -100.0f, yMin = 100.0f, yMid = 0.0f;
 float width = 0.0f, length = 0.0f;
 
-float s = 0.5f;
-float basisMatrix[16] = { -s, 2.0f - s, s - 2.0f, s,
-										2.0f * s, s - 3.0f, 3.0f - 2.0f * s, -s,
-										-s, 0.0f, s, 0.0f,
-										0.0f, 1.0f, 0.0f, 0.0f };
-
-int g_iMenuId;
+//cart position
+int position = 0, positionf = 0;
+float progress = 0.0f;
+//speed
+float driveSpeed = 0.0f, acceleration = 1.0f;
 
 // transformation variable
 float g_vLandRotate[3] = { 0.0f, 0.0f, 0.0f };
 float g_vLandTranslate[3] = { 0.0f, 0.0f, 0.0f };
+
+//callback variables
+int g_iMenuId;
 
 int g_vMousePos[2] = { 0, 0 };
 int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
@@ -120,15 +131,8 @@ VIEWSTATE g_ViewState = VIEWSTATE::AUTO;
 enum class RAILSTATE { TSHAPE, SQUARE };
 RAILSTATE g_RailState = RAILSTATE::SQUARE;
 
-GLuint texture[7];
-
 inline void crossProduct(const spaceVector& u, const spaceVector& v, spaceVector& result) {
 	result.x = u.y * v.z - u.z * v.y, result.y = u.z * v.x - u.x * v.z, result.z = u.x * v.y - u.y * v.x;
-}
-
-void normalize(spaceVector& u) {
-	float scalar = sqrt(pow(u.x, 2) + pow(u.y, 2) + pow(u.z, 2));
-	u.x /= scalar, u.y /= scalar, u.z /= scalar;
 }
 
 int loadSplines(char* argv) {
@@ -209,7 +213,7 @@ void Subdivide(float u0, float u1, float* splineMatrix, const point& c1, const p
 	if (u1 - u0 > 0.002f) {
 		point p = point(c1.x, c1.y, c1.z);
 		p += (c4 - c1) * umid;
-		if (sqrt(pow(p.x - result[0], 2) + pow(p.y - result[1], 2) + pow(p.z - result[2], 2)) > 0.05) {
+		if (u1 - u0 > 0.01f || sqrt(pow(p.x - result[0], 2) + pow(p.y - result[1], 2) + pow(p.z - result[2], 2)) > 0.05) {
 			delete[] result;
 			Subdivide(u0, umid, splineMatrix, c1, c4);
 			Subdivide(umid, u1, splineMatrix, c1, c4);
@@ -242,17 +246,17 @@ void Subdivide(float u0, float u1, float* splineMatrix, const point& c1, const p
 		uTangentMatrix[0] = 3 * pow(u0, 2), uTangentMatrix[1] = 2 * u0;
 		result = matrixMultiplication(uTangentMatrix, splineMatrix, 1, 4, 4, 3);
 		railTangent[len].x = result[0], railTangent[len].y = result[1], railTangent[len].z = result[2];
-		normalize(railTangent[len]);
+		railTangent[len].normalize();
 		railDerivative[len] = sqrt(pow(result[0], 2) + pow(result[1], 2) + pow(result[2], 2));
 		delete[] result;
 
 		//compute normal
 		crossProduct(railBinormal[len], railTangent[len], railNormal[len]);
-		normalize(railNormal[len]);
+		railNormal[len].normalize();
 
 		//computer binormal
 		crossProduct(railTangent[len], railNormal[len], railBinormal[len + 1]);
-		normalize(railBinormal[len + 1]);
+		railBinormal[len + 1].normalize();
 
 		len++;
 	}
@@ -269,7 +273,7 @@ void buildSpline(const point& c1, const point& c2, const point& c3, const point&
 	Subdivide(0.0f, 1.0f, splineMatrix, c1, c4);
 
 	if (last) {
-		//draw c4
+		//draw last point
 		float uMatrix[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 		float uTangentMatrix[4] = { 3.0f, 2.0f, 1.0, 0.0f };
 		float* result = matrixMultiplication(uMatrix, splineMatrix, 1, 4, 4, 3);
@@ -287,21 +291,20 @@ void buildSpline(const point& c1, const point& c2, const point& c3, const point&
 		//compute tangent
 		result = matrixMultiplication(uTangentMatrix, splineMatrix, 1, 4, 4, 3);
 		railTangent[len].x = result[0], railTangent[len].y = result[1], railTangent[len].z = result[2];
-		normalize(railTangent[len]);
+		railTangent[len].normalize();
 		railDerivative[len] = sqrt(pow(result[0], 2) + pow(result[1], 2) + pow(result[2], 2));
 		delete[] result;
 
 		//compute normal
 		crossProduct(railBinormal[len], railTangent[len], railNormal[len]);
-		normalize(railNormal[len]);
+		railNormal[len].normalize();
 
 		//computer binormal
 		crossProduct(railTangent[len], railNormal[len], railBinormal[len + 1]);
-		normalize(railBinormal[len + 1]);
+		railBinormal[len + 1].normalize();
 
 		len++;
 	}
-
 	delete[] splineMatrix;
 }
 
@@ -342,25 +345,31 @@ void myinit() {
 	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
 
 	// allocate rail memory
-	rail = new point[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railTangent = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railDerivative = new float[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railNormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railBinormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 2];
+	rail = new point[(g_Splines->numControlPoints - 3) * 2000 + 1];
+	railTangent = new spaceVector[(g_Splines->numControlPoints - 3) * 2000 + 1];
+	railDerivative = new float[(g_Splines->numControlPoints - 3) * 2000 + 1];
+	railNormal = new spaceVector[(g_Splines->numControlPoints - 3) * 2000 + 1];
+	railBinormal = new spaceVector[(g_Splines->numControlPoints - 3) * 2000 + 2];
 
 	crossProduct(g_Splines->points[1] - g_Splines->points[0], spaceVector{ 0.0, 0.0,1.0 }, railBinormal[0]);
 
+	node = new int[g_Splines->numControlPoints-2];
+
 	for (int i = 0; i < g_Splines->numControlPoints - 4; i++) {
+		node[i] = len;
+		printf("len:	%d\n", len);
 		buildSpline(g_Splines->points[i],
 					g_Splines->points[i + 1],
 					g_Splines->points[i + 2],
 					g_Splines->points[i + 3], false);
 	}
 	//last spline
+	node[g_Splines->numControlPoints - 4] = len;
 	buildSpline(g_Splines->points[g_Splines->numControlPoints - 4],
 				g_Splines->points[g_Splines->numControlPoints - 3],
 				g_Splines->points[g_Splines->numControlPoints - 2],
 				g_Splines->points[g_Splines->numControlPoints - 1], true);
+	node[g_Splines->numControlPoints - 3] = len-1;
 
 	printf("size:	%d\n", (g_Splines->numControlPoints - 3) * 1000 + 1);
 	printf("len:	%d\n", len);
@@ -415,11 +424,9 @@ void drawCube(int i) {
 			 rail[i].z + alpha * (railNormal[i].z - railBinormal[i + 1].z) },
 		};
 
-		//drawFace(0, 3, 2, 1, vertices, railTangent[i] * -1);
 		drawFace(2, 3, 7, 6, vertices, railNormal[i]);
 		drawFace(0, 4, 7, 3, vertices, railBinormal[i] * -1);
 		drawFace(1, 2, 6, 5, vertices, railBinormal[i]);
-		//drawFace(4, 5, 6, 7, vertices, railTangent[i]);
 		drawFace(0, 1, 5, 4, vertices, railNormal[i] * -1);
 
 		//second rail
@@ -433,11 +440,9 @@ void drawCube(int i) {
 			vertices[j + 4].z += beta * railBinormal[i + 1].z;
 		}
 
-		//drawFace(0, 3, 2, 1, vertices, railTangent[i] * -1);
 		drawFace(2, 3, 7, 6, vertices, railNormal[i]);
 		drawFace(0, 4, 7, 3, vertices, railBinormal[i] * -1);
 		drawFace(1, 2, 6, 5, vertices, railBinormal[i]);
-		//drawFace(4, 5, 6, 7, vertices, railTangent[i]);
 		drawFace(0, 1, 5, 4, vertices, railNormal[i] * -1);
 	}
 	else if (g_RailState == RAILSTATE::TSHAPE) {
@@ -586,12 +591,12 @@ void display() {
 		glRotatef(g_vLandRotate[1], 0.0, 1.0, 0.0);
 		glRotatef(g_vLandRotate[2], 0.0, 0.0, 1.0);
 	}
-	gluLookAt(rail[position].x + passengerOffset * railNormal[position].x + middleOffset * railBinormal[position + 1].x,
-			  rail[position].y + passengerOffset * railNormal[position].y + middleOffset * railBinormal[position + 1].y,
-			  rail[position].z + passengerOffset * railNormal[position].z + middleOffset * railBinormal[position + 1].z,
-			  rail[position].x + railTangent[position].x + middleOffset * railBinormal[position + 1].x,
-			  rail[position].y + railTangent[position].y + middleOffset * railBinormal[position + 1].y,
-			  rail[position].z + railTangent[position].z + middleOffset * railBinormal[position + 1].z,
+	gluLookAt((rail[position + 1].x - rail[position].x) * progress + rail[position].x + passengerOffset * railNormal[position].x + middleOffset * railBinormal[position + 1].x,
+			  (rail[position + 1].y - rail[position].y) * progress + rail[position].y + passengerOffset * railNormal[position].y + middleOffset * railBinormal[position + 1].y,
+			  (rail[position + 1].z - rail[position].z) * progress + rail[position].z + passengerOffset * railNormal[position].z + middleOffset * railBinormal[position + 1].z,
+			  (rail[position + 1].x - rail[position].x) * progress + rail[position].x + railTangent[position].x + middleOffset * railBinormal[position + 1].x,
+			  (rail[position + 1].y - rail[position].y) * progress + rail[position].y + railTangent[position].y + middleOffset * railBinormal[position + 1].y,
+			  (rail[position + 1].z - rail[position].z) * progress + rail[position].z + railTangent[position].z + middleOffset * railBinormal[position + 1].z,
 			  railNormal[position].x, railNormal[position].y, railNormal[position].z);
 
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
@@ -646,19 +651,26 @@ void reshape(int w, int h) {
 void doIdle() {
 	//control moving speed
 	if (g_ViewState == VIEWSTATE::AUTO) {
-		driveSpeed = 10.0f;
+		driveSpeed = 5.0f;
 		if (railDerivative[position] != 0)
-			driveSpeed = std::max(10.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
-		position += driveSpeed;
-		if (position > len)
-			position = 0;
+			driveSpeed = std::max(5.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
+		positionf += round(driveSpeed);
+		if (positionf > 1000 * (g_Splines->numControlPoints-3))
+			position = 0, positionf = 0;
+		else {
+			int segment = floor(positionf / 1000);
+			double forward = (positionf % 1000) * 0.001 * (node[segment + 1] - node[segment]);
+			position = node[segment] + floor(forward);
+			progress = forward - floor(forward);
+		}
 	}
 	else if (g_ViewState == VIEWSTATE::DRIVE) {
 		driveSpeed -= 0.1f;
 		driveSpeed = std::max(driveSpeed, 0.0f);
-		position += driveSpeed;
+		positionf += driveSpeed;
+		position = round(positionf);
 		if (position > len)
-			position = 0;
+			position = 0, positionf=0.0f;
 	}
 	else if (g_ViewState == VIEWSTATE::STOP) {
 		driveSpeed = 0.0f;
