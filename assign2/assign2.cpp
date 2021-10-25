@@ -63,6 +63,7 @@ struct point {
 	inline point operator+(const spaceVector& v0) { return point(x + v0.x, y + v0.y, z + v0.z); }
 	inline point& operator+=(const spaceVector& v0) { x += v0.x, y += v0.y, z += v0.z; return *this; }
 	inline spaceVector operator-(const point& p0) const { return spaceVector(x - p0.x, y - p0.y, z - p0.z); }
+	inline bool operator!=(const point& p0) const { return x != p0.x || y != p0.y || z != p0.z; }
 };
 
 /* spline struct which contains how many control points, and an array of control points */
@@ -108,7 +109,7 @@ float width = 0.0f, length = 0.0f;
 int position = 0, positionf = 0;
 float progress = 0.0f;
 //speed
-float driveSpeed = 0.0f, acceleration = 1.0f;
+float driveSpeed = 0.0f, acceleration = 1.0f, deltaT = 10.0f;
 
 // transformation variable
 float g_vLandRotate[3] = { 0.0f, 0.0f, 0.0f };
@@ -122,15 +123,26 @@ int g_iLeftMouseButton = 0;    /* 1 if pressed, 0 if not */
 int g_iMiddleMouseButton = 0;
 int g_iRightMouseButton = 0;
 
+//tree position
+point* trees;
+float* treeSize;
+int treeNum = 40;
+
+spaceVector xaxis(1.0, 0.0, 0.0);
+spaceVector yaxis(0.0, -1.0, 0.0);
+spaceVector zaxis(0.0, 0.0, 1.0);
+
 //states
-enum class CONTROLSTATE { ROTATE, TRANSLATE, SCALE };
+enum class CONTROLSTATE { ROTATE, TRANSLATE };
 CONTROLSTATE g_ControlState = CONTROLSTATE::ROTATE;
 
 enum class VIEWSTATE { AUTO, DRIVE, STOP, OVERVIEW };
 VIEWSTATE g_ViewState = VIEWSTATE::AUTO;
 
-enum class RAILSTATE { TSHAPE, SQUARE };
-RAILSTATE g_RailState = RAILSTATE::SQUARE;
+enum class RAILSTATE { TSHAPE, SQUARE, CUBE };
+RAILSTATE g_RailState = RAILSTATE::TSHAPE;
+
+bool circular = true;
 
 std::chrono::high_resolution_clock::time_point thisFrame = std::chrono::high_resolution_clock::now();
 std::chrono::high_resolution_clock::time_point accumulateTime = std::chrono::high_resolution_clock::now();
@@ -214,9 +226,9 @@ void subdivide(float u0, float u1, float* splineMatrix, const point& c1, const p
 	float* result = matrixMultiplication(uMatrix, splineMatrix, 1, 4, 4, 3);
 
 	//subdivide if too long or far enough from line c1 c4
-	if (u1 - u0 > 0.002f && (u1 - u0 > 0.01f || sqrt(pow((c4.x - c1.x) * umid + c1.x - result[0], 2) +
-													 pow((c4.y - c1.y) * umid + c1.y - result[1], 2) +
-													 pow((c4.z - c1.z) * umid + c1.z - result[2], 2)) > 0.055)) {
+	if (u1 - u0 > 0.002f && (u1 - u0 > 0.2f || sqrt(pow((c4.x - c1.x) * umid + c1.x - result[0], 2) +
+													pow((c4.y - c1.y) * umid + c1.y - result[1], 2) +
+													pow((c4.z - c1.z) * umid + c1.z - result[2], 2)) > 0.056)) {
 		delete[] result;
 		subdivide(u0, umid, splineMatrix, c1, c4);
 		subdivide(umid, u1, splineMatrix, c1, c4);
@@ -289,18 +301,24 @@ void buildSpline(const point& c1, const point& c2, const point& c3, const point&
 
 void myinit() {
 	glClearColor(0.0, 0.0, 0.0, 0.0);
-	glShadeModel(GL_SMOOTH);
 	glEnable(GL_DEPTH_TEST);
 
 	// allocate rail memory
-	rail = new point[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railTangent = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railDerivative = new float[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railNormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 1];
-	railBinormal = new spaceVector[(g_Splines->numControlPoints - 3) * 1000 + 2];
-	//arbitrary vector for computing rail normal and binormal
-	crossProduct(g_Splines->points[1] - g_Splines->points[0], spaceVector(0.0, 0.0, 1.0), railBinormal[0]);
+	rail = new point[g_Splines->numControlPoints * 1000 + 1];
+	railTangent = new spaceVector[g_Splines->numControlPoints * 1000 + 1];
+	railDerivative = new float[g_Splines->numControlPoints * 1000 + 1];
+	railNormal = new spaceVector[g_Splines->numControlPoints * 1000 + 1];
+	railBinormal = new spaceVector[g_Splines->numControlPoints * 1000 + 2];
 
+	//arbitrary vector for computing rail normal and binormal
+	spaceVector v0 = g_Splines->points[1] - g_Splines->points[0];
+	v0.normalize();
+	if (v0.x == 0 && v0.y == 0 && v0.z == 1)
+		crossProduct(v0, spaceVector(1.0, 0.0, 0.0), railBinormal[0]);
+	else
+		crossProduct(v0, spaceVector(0.0, 0.0, 1.0), railBinormal[0]);
+
+	//build splines
 	node = new int[g_Splines->numControlPoints - 2];
 
 	for (int i = 0; i < g_Splines->numControlPoints - 4; i++) {
@@ -313,6 +331,7 @@ void myinit() {
 	}
 	// last spline
 	node[g_Splines->numControlPoints - 4] = len;
+	printf("total points:	%d\n", len);
 	buildSpline(g_Splines->points[g_Splines->numControlPoints - 4],
 				g_Splines->points[g_Splines->numControlPoints - 3],
 				g_Splines->points[g_Splines->numControlPoints - 2],
@@ -320,7 +339,7 @@ void myinit() {
 	node[g_Splines->numControlPoints - 3] = len - 1;
 
 	printf("total points:	%d\n", len);
-	printf("array size:	%d\n", (g_Splines->numControlPoints - 3) * 1000 + 1);
+	printf("array size:	%d\n", g_Splines->numControlPoints * 1000 + 1);
 
 	// find boundary
 	for (int i = 0; i < g_Splines->numControlPoints; i++) {
@@ -333,7 +352,7 @@ void myinit() {
 	}
 
 	xMid = round((xMax + xMin) / 2.0f), yMid = round((yMax + yMin) / 2.0f);
-	width = round(xMax - xMin) + 5.0f, length = round(yMax - yMin) + 5.0f;
+	width = round(xMax - xMin) + 6.0f, length = round(yMax - yMin) + 6.0f;
 	width = width < length ? length : width;
 	hMid = round((hMin + hMax) / 2.0f);
 	hMin = round(hMin - 1.0f);
@@ -346,7 +365,7 @@ void myinit() {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 1024, 1024, GL_RGB, GL_UNSIGNED_BYTE, groundBGR.data);
+	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 2048, 2048, GL_RGB, GL_UNSIGNED_BYTE, groundBGR.data);
 	// sky box
 	for (int i = 1; i < 7; i++) {
 		glBindTexture(GL_TEXTURE_2D, texture[i]);
@@ -367,6 +386,61 @@ void myinit() {
 	glLightfv(GL_LIGHT0, GL_DIFFUSE, light_diffuse);
 	glLightfv(GL_LIGHT0, GL_SPECULAR, light_specular);
 	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+
+	srand(time(NULL));
+
+	trees = new point[treeNum];
+	treeSize = new float[treeNum];
+	for (int i = 0; i < treeNum; i++) {
+		trees[i].x = (xMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
+		trees[i].y = (yMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
+		/*do {
+			trees[i].x = (xMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
+		} while (xMin < trees[i].x && xMax > trees[i].x);*/
+		trees[i].z = hMin;
+		treeSize[i] = width * (0.005 + 0.001 * (rand() % 20));
+	}
+}
+
+void drawSkybox(int v1, int v2, int v3, int v4, point* vertices, const spaceVector& normal) {
+	glNormal3f(normal.x, normal.y, normal.z);
+	glBegin(GL_POLYGON);
+	glTexCoord2f(0.001f, 0.001f);
+	glVertex3f(vertices[v1].x, vertices[v1].y, vertices[v1].z);
+	glTexCoord2f(0.001f, 0.999f);
+	glVertex3f(vertices[v2].x, vertices[v2].y, vertices[v2].z);
+	glTexCoord2f(0.999f, 0.999f);
+	glVertex3f(vertices[v3].x, vertices[v3].y, vertices[v3].z);
+	glTexCoord2f(0.999f, 0.001f);
+	glVertex3f(vertices[v4].x, vertices[v4].y, vertices[v4].z);
+	glEnd();
+}
+
+void skyBox() {
+	float side = round(width * 1.5);
+	point vertices[8] = {
+		point(xMid - side, yMid + side, hMid - side),
+		point(xMid - side, yMid + side, hMid + side),
+		point(xMid + side, yMid + side, hMid + side),
+		point(xMid + side, yMid + side, hMid - side),
+		point(xMid - side, yMid - side, hMid - side),
+		point(xMid - side, yMid - side, hMid + side),
+		point(xMid + side, yMid - side, hMid + side),
+		point(xMid + side, yMid - side, hMid - side)
+	};
+
+	glBindTexture(GL_TEXTURE_2D, texture[1]);	//back
+	drawSkybox(1, 0, 3, 2, vertices, spaceVector(0, -1, 0));
+	glBindTexture(GL_TEXTURE_2D, texture[4]);	//left
+	drawSkybox(2, 3, 7, 6, vertices, spaceVector(-1, 0, 0));
+	glBindTexture(GL_TEXTURE_2D, texture[2]);	//bottom
+	drawSkybox(7, 3, 0, 4, vertices, spaceVector(0, 0, 1));
+	glBindTexture(GL_TEXTURE_2D, texture[6]);	//top
+	drawSkybox(2, 6, 5, 1, vertices, spaceVector(0, 0, -1));
+	glBindTexture(GL_TEXTURE_2D, texture[3]); // front
+	drawSkybox(6, 7, 4, 5, vertices, spaceVector(0, 1, 0));
+	glBindTexture(GL_TEXTURE_2D, texture[5]); //right 
+	drawSkybox(5, 4, 0, 1, vertices, spaceVector(1, 0, 0));
 }
 
 void drawFace(int v1, int v2, int v3, int v4, point vertices[8], const spaceVector& normalBack, const spaceVector& normalFront) {
@@ -380,8 +454,30 @@ void drawFace(int v1, int v2, int v3, int v4, point vertices[8], const spaceVect
 	glEnd();
 }
 
-void drawCube(int i) {
-	if (g_RailState == RAILSTATE::SQUARE) {
+void drawCart(float cartWidth, float cartLength, float cartHeight, float originOffset, float forwardOffset, point passenger) {
+	passenger += railBinormal[position + 1] * originOffset;
+	passenger += railTangent[position] * forwardOffset;
+	point vertices[8] = {
+		passenger + railTangent[position] * cartLength,
+		passenger + railNormal[position] * cartHeight + railTangent[position] * cartLength,
+		passenger + railBinormal[position + 1] * cartWidth + railNormal[position] * cartHeight + railTangent[position] * cartLength,
+		passenger + railBinormal[position + 1] * cartWidth + railTangent[position] * cartLength,
+		passenger,
+		passenger + railNormal[position] * cartHeight,
+		passenger + railBinormal[position + 1] * cartWidth + railNormal[position] * cartHeight,
+		passenger + railBinormal[position + 1] * cartWidth,
+	};
+
+	drawFace(0, 3, 2, 1, vertices, railTangent[position], railTangent[position]);
+	drawFace(2, 3, 7, 6, vertices, railBinormal[position + 1], railBinormal[position + 1]);
+	drawFace(0, 4, 7, 3, vertices, railNormal[position] * -1, railNormal[position] * -1);
+	drawFace(1, 2, 6, 5, vertices, railNormal[position], railNormal[position]);
+	drawFace(4, 5, 6, 7, vertices, railTangent[position] * -1, railTangent[position] * -1);
+	drawFace(0, 1, 5, 4, vertices, railBinormal[position + 1] * -1, railBinormal[position + 1] * -1);
+}
+
+void drawRail(int i, RAILSTATE draw_RailState) {
+	if (draw_RailState == RAILSTATE::SQUARE) {
 		//main rail
 		float alpha = 0.002f;
 		point vertices[8] = {
@@ -432,7 +528,7 @@ void drawCube(int i) {
 		drawFace(1, 2, 6, 5, vertices, railBinormal[i + 2], railBinormal[i + 1]);
 		drawFace(0, 1, 5, 4, vertices, railNormal[i + 1] * -1, railNormal[i] * -1);
 	}
-	else if (g_RailState == RAILSTATE::TSHAPE) {
+	else if (draw_RailState == RAILSTATE::TSHAPE) {
 		//main rail
 		float alpha = 0.002f, gamma = 0.0016f;
 		point verticesHorizontal[8] = {
@@ -527,74 +623,183 @@ void drawCube(int i) {
 		drawFace(1, 2, 6, 5, verticesVertical, railBinormal[i + 2], railBinormal[i + 1]);
 		drawFace(0, 1, 5, 4, verticesVertical, railNormal[i + 1] * -1, railNormal[i] * -1);
 	}
+	else if (draw_RailState == RAILSTATE::CUBE) {
+		float alpha = 0.002f;
+		float beta = 0.02f;
+		point vertices[8] = {
+			point(rail[i + 1].x + alpha * (-railNormal[i + 1].x - railBinormal[i + 2].x),
+			 rail[i + 1].y + alpha * (-railNormal[i + 1].y - railBinormal[i + 2].y),
+			 rail[i + 1].z + alpha * (-railNormal[i + 1].z - railBinormal[i + 2].z)),
+			point(rail[i + 1].x + alpha * (-railNormal[i + 1].x + railBinormal[i + 2].x) + beta * railBinormal[i + 2].x,
+			 rail[i + 1].y + alpha * (-railNormal[i + 1].y + railBinormal[i + 2].y) + beta * railBinormal[i + 2].y,
+			 rail[i + 1].z + alpha * (-railNormal[i + 1].z + railBinormal[i + 2].z) + beta * railBinormal[i + 2].z),
+			point(rail[i + 1].x + alpha * (railNormal[i + 1].x + railBinormal[i + 2].x) + beta * railBinormal[i + 2].x,
+			 rail[i + 1].y + alpha * (railNormal[i + 1].y + railBinormal[i + 2].y) + beta * railBinormal[i + 2].y,
+			 rail[i + 1].z + alpha * (railNormal[i + 1].z + railBinormal[i + 2].z) + beta * railBinormal[i + 2].z),
+			point(rail[i + 1].x + alpha * (railNormal[i + 1].x - railBinormal[i + 2].x),
+			 rail[i + 1].y + alpha * (railNormal[i + 1].y - railBinormal[i + 2].y) ,
+			 rail[i + 1].z + alpha * (railNormal[i + 1].z - railBinormal[i + 2].z)),
+			point(rail[i].x + alpha * (-railNormal[i].x - railBinormal[i + 1].x),
+			 rail[i].y + alpha * (-railNormal[i].y - railBinormal[i + 1].y),
+			 rail[i].z + alpha * (-railNormal[i].z - railBinormal[i + 1].z)),
+			point(rail[i].x + alpha * (-railNormal[i].x + railBinormal[i + 1].x) + beta * railBinormal[i + 1].x,
+			 rail[i].y + alpha * (-railNormal[i].y + railBinormal[i + 1].y) + beta * railBinormal[i + 1].y,
+			 rail[i].z + alpha * (-railNormal[i].z + railBinormal[i + 1].z) + beta * railBinormal[i + 1].z),
+			point(rail[i].x + alpha * (railNormal[i].x + railBinormal[i + 1].x) + beta * railBinormal[i + 1].x,
+			 rail[i].y + alpha * (railNormal[i].y + railBinormal[i + 1].y) + beta * railBinormal[i + 1].y,
+			 rail[i].z + alpha * (railNormal[i].z + railBinormal[i + 1].z) + beta * railBinormal[i + 1].z),
+			point(rail[i].x + alpha * (railNormal[i].x - railBinormal[i + 1].x),
+			 rail[i].y + alpha * (railNormal[i].y - railBinormal[i + 1].y),
+			 rail[i].z + alpha * (railNormal[i].z - railBinormal[i + 1].z))
+		};
+
+		drawFace(2, 3, 7, 6, vertices, railNormal[i + 1], railNormal[i]);
+		drawFace(3, 0, 4, 7, vertices, railBinormal[i + 2] * -1, railBinormal[i + 1] * -1);
+		drawFace(1, 2, 6, 5, vertices, railBinormal[i + 2], railBinormal[i + 1]);
+		//drawFace(0, 1, 5, 4, vertices, railNormal[i + 1] * -1, railNormal[i] * -1);
+	}
 }
 
-void drawSkybox(int v1, int v2, int v3, int v4, point* vertices, const spaceVector& normal) {
+void drawCrossbar(int i) {
+	static point last(0.0f, 0.0f, 0.0f);
+	if (pow(rail[i].x - last.x, 2) + pow(rail[i].y - last.y, 2) + pow(rail[i].z - last.z, 2) > 0.05) {
+		float alpha = 0.002f, beta = 0.03f, gamma = 0.005f, delta = 0.01f;
+		point vertices[8] = {
+			point(rail[i + 1].x - gamma * railNormal[i + 1].x - delta * railBinormal[i + 2].x,
+			 rail[i + 1].y - gamma * railNormal[i + 1].y - delta * railBinormal[i + 2].y,
+			 rail[i + 1].z - gamma * railNormal[i + 1].z - delta * railBinormal[i + 2].z),
+			point(rail[i + 1].x - gamma * railNormal[i + 1].x + beta * railBinormal[i + 2].x,
+			 rail[i + 1].y - gamma * railNormal[i + 1].y + beta * railBinormal[i + 2].y,
+			 rail[i + 1].z - gamma * railNormal[i + 1].z + beta * railBinormal[i + 2].z),
+			point(rail[i + 1].x - alpha * railNormal[i + 1].x + beta * railBinormal[i + 2].x,
+			 rail[i + 1].y - alpha * railNormal[i + 1].y + beta * railBinormal[i + 2].y,
+			 rail[i + 1].z - alpha * railNormal[i + 1].z + beta * railBinormal[i + 2].z),
+			point(rail[i + 1].x - alpha * railNormal[i + 1].x - delta * railBinormal[i + 2].x,
+			 rail[i + 1].y - alpha * railNormal[i + 1].y - delta * railBinormal[i + 2].y,
+			 rail[i + 1].z - alpha * railNormal[i + 1].z - delta * railBinormal[i + 2].z),
+			point(rail[i].x - gamma * railNormal[i].x - delta * railBinormal[i + 1].x,
+			 rail[i].y - gamma * railNormal[i].y - delta * railBinormal[i + 1].y,
+			 rail[i].z - gamma * railNormal[i].z - delta * railBinormal[i + 1].z),
+			point(rail[i].x - gamma * railNormal[i].x + beta * railBinormal[i + 1].x,
+			 rail[i].y - gamma * railNormal[i].y + beta * railBinormal[i + 1].y,
+			 rail[i].z - gamma * railNormal[i].z + beta * railBinormal[i + 1].z),
+			point(rail[i].x - alpha * railNormal[i].x + beta * railBinormal[i + 1].x,
+			 rail[i].y - alpha * railNormal[i].y + beta * railBinormal[i + 1].y,
+			 rail[i].z - alpha * railNormal[i].z + beta * railBinormal[i + 1].z),
+			point(rail[i].x - alpha * railNormal[i].x - delta * railBinormal[i + 1].x,
+			 rail[i].y - alpha * railNormal[i].y - delta * railBinormal[i + 1].y,
+			 rail[i].z - alpha * railNormal[i].z - delta * railBinormal[i + 1].z)
+		};
+
+		drawFace(0, 3, 2, 1, vertices, railTangent[position], railTangent[position]);
+		drawFace(2, 3, 7, 6, vertices, railNormal[i + 1], railNormal[i]);
+		drawFace(3, 0, 4, 7, vertices, railBinormal[i + 2] * -1, railBinormal[i + 1] * -1);
+		drawFace(1, 2, 6, 5, vertices, railBinormal[i + 2], railBinormal[i + 1]);
+		drawFace(4, 5, 6, 7, vertices, railTangent[position] * -1, railTangent[position] * -1);
+		drawFace(0, 1, 5, 4, vertices, railNormal[i + 1] * -1, railNormal[i] * -1);
+
+		last.x = rail[i].x, last.y = rail[i].y, last.z = rail[i].z;
+	}
+}
+
+void drawTree(point& origin, float size) {
+
+	point vertices[8] = {
+		origin + xaxis * size,
+		origin + xaxis * size + zaxis * size * 4.0f,
+		origin + xaxis * size + yaxis * size + zaxis * size * 4.0f,
+		origin + xaxis * size + yaxis * size,
+		origin,
+		origin + zaxis * size * 4.0f,
+		origin + yaxis * size + zaxis * size * 4.0f,
+		origin + yaxis * size,
+	};
+
+	drawFace(0, 3, 2, 1, vertices, xaxis, xaxis);
+	drawFace(2, 3, 7, 6, vertices, yaxis, yaxis);
+	drawFace(0, 4, 7, 3, vertices, zaxis * -1, zaxis * -1);
+	drawFace(1, 2, 6, 5, vertices, zaxis, zaxis);
+	drawFace(4, 5, 6, 7, vertices, xaxis * -1, xaxis * -1);
+	drawFace(0, 1, 5, 4, vertices, yaxis * -1, yaxis * -1);
+}
+
+void drawLeaf(point& origin, float size) {
+
+	//glNormal3f(normalBack.x, normalBack.y, normalBack.z);
+	point vertices[6] = {
+		origin + xaxis * size * 0.5f + yaxis * size * 0.5f + zaxis * size * 6.0f,
+		origin + xaxis * size * -1.0f + yaxis * size * -1.0f + zaxis * size * 3.0f,
+		origin + xaxis * size * -1.0f + yaxis * size * 2.0f + zaxis * size * 3.0f,
+		origin + xaxis * size * 2.0f + yaxis * size * 2.0f + zaxis * size * 3.0f,
+		origin + xaxis * size * 2.0f + yaxis * size * -1.0f + zaxis * size * 3.0f,
+		origin + xaxis * size * -1.0f + yaxis * size * -1.0f + zaxis * size * 3.0f
+	};
+
+	spaceVector normal;
+
+	glBegin(GL_TRIANGLE_FAN);
+	glVertex3f(vertices[0].x, vertices[0].y, vertices[0].z);
+	glVertex3f(vertices[1].x, vertices[1].y, vertices[1].z);
+
+	crossProduct(vertices[1] - vertices[0], vertices[2] - vertices[0], normal);
+	normal.normalize();
 	glNormal3f(normal.x, normal.y, normal.z);
-	glBegin(GL_POLYGON);
-	glTexCoord2f(0.001f, 0.001f);
-	glVertex3f(vertices[v1].x, vertices[v1].y, vertices[v1].z);
-	glTexCoord2f(0.001f, 0.999f);
-	glVertex3f(vertices[v2].x, vertices[v2].y, vertices[v2].z);
-	glTexCoord2f(0.999f, 0.999f);
-	glVertex3f(vertices[v3].x, vertices[v3].y, vertices[v3].z);
-	glTexCoord2f(0.999f, 0.001f);
-	glVertex3f(vertices[v4].x, vertices[v4].y, vertices[v4].z);
+	glVertex3f(vertices[2].x, vertices[2].y, vertices[2].z);
+
+	crossProduct(vertices[2] - vertices[0], vertices[3] - vertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(vertices[3].x, vertices[3].y, vertices[3].z);
+
+	crossProduct(vertices[3] - vertices[0], vertices[4] - vertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(vertices[4].x, vertices[4].y, vertices[4].z);
+
+	crossProduct(vertices[4] - vertices[0], vertices[1] - vertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(vertices[1].x, vertices[1].y, vertices[1].z);
 	glEnd();
-}
 
-void skyBox() {
-	//float side = round(width) + 10.0f;
-	float side = 40.0f;
-	point vertices[8] = {
-		point(xMid - side, yMid + side, hMid - side),
-		point(xMid - side, yMid + side, hMid + side),
-		point(xMid + side, yMid + side, hMid + side),
-		point(xMid + side, yMid + side, hMid - side),
-		point(xMid - side, yMid - side, hMid - side),
-		point(xMid - side, yMid - side, hMid + side),
-		point(xMid + side, yMid - side, hMid + side),
-		point(xMid + side, yMid - side, hMid - side)
+	point topVertices[6] = {
+		origin + xaxis * size * 0.5f + yaxis * size * 0.5f + zaxis * size * 10.0f,
+		origin + xaxis * size * -0.5f + yaxis * size * -0.5f + zaxis * size * 4.0f,
+		origin + xaxis * size * -0.5f + yaxis * size * 1.5f + zaxis * size * 4.0f,
+		origin + xaxis * size * 1.5f + yaxis * size * 1.5f + zaxis * size * 4.0f,
+		origin + xaxis * size * 1.5f + yaxis * size * -0.5f + zaxis * size * 4.0f,
+		origin + xaxis * size * -0.5f + yaxis * size * -0.5f + zaxis * size * 4.0f
 	};
 
-	glBindTexture(GL_TEXTURE_2D, texture[1]);	//back
-	drawSkybox(1, 0, 3, 2, vertices, spaceVector(0, -1, 0));
-	glBindTexture(GL_TEXTURE_2D, texture[4]);	//left
-	drawSkybox(2, 3, 7, 6, vertices, spaceVector(-1, 0, 0));
-	glBindTexture(GL_TEXTURE_2D, texture[2]);	//bottom
-	drawSkybox(7, 3, 0, 4, vertices, spaceVector(0, 0, 1));
-	glBindTexture(GL_TEXTURE_2D, texture[6]);	//top
-	drawSkybox(2, 6, 5, 1, vertices, spaceVector(0, 0, -1));
-	glBindTexture(GL_TEXTURE_2D, texture[3]); // front
-	drawSkybox(6, 7, 4, 5, vertices, spaceVector(0, 1, 0));
-	glBindTexture(GL_TEXTURE_2D, texture[5]); //right 
-	drawSkybox(5, 4, 0, 1, vertices, spaceVector(1, 0, 0));
-}
+	glBegin(GL_TRIANGLE_FAN);
+	glVertex3f(topVertices[0].x, topVertices[0].y, topVertices[0].z);
+	glVertex3f(topVertices[1].x, topVertices[1].y, topVertices[1].z);
 
-void drawCart(float cartWidth, float cartLength, float cartHeight, float originOffset, float forwardOffset, point passenger) {
-	passenger += railBinormal[position + 1] * originOffset;
-	passenger += railTangent[position] * forwardOffset;
-	point vertices[8] = {
-		passenger + railTangent[position] * cartLength,
-		passenger + railNormal[position] * cartHeight + railTangent[position] * cartLength,
-		passenger + railBinormal[position + 1] * cartWidth + railNormal[position] * cartHeight + railTangent[position] * cartLength,
-		passenger + railBinormal[position + 1] * cartWidth + railTangent[position] * cartLength,
-		passenger,
-		passenger + railNormal[position] * cartHeight,
-		passenger + railBinormal[position + 1] * cartWidth + railNormal[position] * cartHeight,
-		passenger + railBinormal[position + 1] * cartWidth,
-	};
+	crossProduct(topVertices[1] - topVertices[0], topVertices[2] - topVertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(topVertices[2].x, topVertices[2].y, topVertices[2].z);
 
-	drawFace(0, 3, 2, 1, vertices, railTangent[position], railTangent[position]);
-	drawFace(2, 3, 7, 6, vertices, railBinormal[position + 1], railBinormal[position + 1]);
-	drawFace(0, 4, 7, 3, vertices, railNormal[position] * -1, railNormal[position] * -1);
-	drawFace(1, 2, 6, 5, vertices, railNormal[position], railNormal[position]);
-	drawFace(4, 5, 6, 7, vertices, railTangent[position] * -1, railTangent[position] * -1);
-	drawFace(0, 1, 5, 4, vertices, railBinormal[position + 1] * -1, railBinormal[position + 1] * -1);
+	crossProduct(topVertices[2] - topVertices[0], topVertices[3] - topVertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(topVertices[3].x, topVertices[3].y, topVertices[3].z);
+
+	crossProduct(topVertices[3] - topVertices[0], topVertices[4] - topVertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(topVertices[4].x, topVertices[4].y, topVertices[4].z);
+
+	crossProduct(topVertices[4] - topVertices[0], topVertices[1] - topVertices[0], normal);
+	normal.normalize();
+	glNormal3f(normal.x, normal.y, normal.z);
+	glVertex3f(topVertices[1].x, topVertices[1].y, topVertices[1].z);
+	glEnd();
 }
 
 void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glShadeModel(GL_SMOOTH);
 
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
@@ -618,7 +823,7 @@ void display() {
 			  passenger.z + railTangent[position].z + middleOffset * railBinormal[position + 1].z,
 			  railNormal[position].x, railNormal[position].y, railNormal[position].z);
 
-	GLfloat light_position[] = { 0.0f, 0.0f, 1.0f, 0.0f };
+	GLfloat light_position[] = { -1.0f, -1.0f, 4.0f, 0.0f };
 	//GLfloat light_position[] = { xMid, yMid, hMax+3.0, 1.0f };
 	glLightfv(GL_LIGHT0, GL_POSITION, light_position);
 
@@ -629,13 +834,13 @@ void display() {
 	glBindTexture(GL_TEXTURE_2D, texture[0]);
 	glNormal3f(0.0f, 0.0f, 1.0f);
 	glBegin(GL_POLYGON);
-	glTexCoord2f(10.0, 10.0);
+	glTexCoord2f(5.0, 5.0);
 	glVertex3f(xMid + width * 2, yMid + width * 2, hMin);
-	glTexCoord2f(0.0, 10.0);
+	glTexCoord2f(0.0, 5.0);
 	glVertex3f(xMid - width * 2, yMid + width * 2, hMin);
 	glTexCoord2f(0.0, 0.0);
 	glVertex3f(xMid - width * 2, yMid - width * 2, hMin);
-	glTexCoord2f(10.0, 0.0);
+	glTexCoord2f(5.0, 0.0);
 	glVertex3f(xMid + width * 2, yMid - width * 2, hMin);
 	glEnd();
 
@@ -644,7 +849,7 @@ void display() {
 
 	GLfloat mat_a_cart[] = { 1.0f, 0.1f, 0.1f, 1.0f };
 	GLfloat mat_d_cart[] = { 0.7f, 0.1f, 0.1f, 1.0f };
-	GLfloat mat_s_cart[] = { 0.7f, 0.1f, 0.1f, 1.0f };
+	GLfloat mat_s_cart[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 	GLfloat low_sh_cart[] = { 10.0f };
 	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a_cart);
 	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d_cart);
@@ -658,6 +863,7 @@ void display() {
 	drawCart(0.014f, 0.002f, 0.004f, 0.003f, 0.004f, passenger);
 	drawCart(0.014f, 0.002f, 0.004f, 0.003f, 0.016f, passenger);
 
+	//rail
 	GLfloat mat_a_rail[] = { 0.7f, 0.76f, 0.8f, 1.0f };
 	GLfloat mat_d_rail[] = { 0.35f, 0.38f, 0.4f, 1.0f };
 	GLfloat mat_s_rail[] = { 0.35f, 0.38f, 0.4f, 1.0f };
@@ -667,8 +873,51 @@ void display() {
 	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s_rail);
 	glMaterialfv(GL_FRONT, GL_SHININESS, low_sh_rail);
 
+	if (g_RailState == RAILSTATE::SQUARE) {
+		for (int i = 0; i < len - 1; i++) {
+			if (position - 10 < i && i < position + 1000 || (position + 1000 - len + 1)>i)
+				drawRail(i, RAILSTATE::SQUARE);
+			else
+				drawRail(i, RAILSTATE::CUBE);
+		}
+	}
+	else if (g_RailState == RAILSTATE::TSHAPE) {
+		for (int i = 0; i < len - 1; i++) {
+			if (position - 10 < i && i < position + 1000 || (position + 1000 - len + 1)>i)
+				drawRail(i, RAILSTATE::TSHAPE);
+			else
+				drawRail(i, RAILSTATE::CUBE);
+		}
+	}
+
+	GLfloat mat_a_wood[] = { 0.84f, 0.58f, 0.5f, 1.0f };
+	GLfloat mat_d_wood[] = { 0.42f, 0.29f, 0.25f, 1.0f };
+	GLfloat mat_s_wood[] = { 0.42f, 0.29f, 0.25f, 1.0f };
+	GLfloat low_sh_wood[] = { 1.0f };
+	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a_wood);
+	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d_wood);
+	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s_wood);
+	glMaterialfv(GL_FRONT, GL_SHININESS, low_sh_wood);
+
 	for (int i = 0; i < len - 1; i++)
-		drawCube(i);
+		drawCrossbar(i);
+
+	glShadeModel(GL_FLAT);
+	//render trees
+	for (int i = 0; i < treeNum; i++)
+		drawTree(trees[i], treeSize[i]);
+
+	GLfloat mat_a_leaf[] = { 0.76f, 1.0f, 0.48f, 1.0f };
+	GLfloat mat_d_leaf[] = { 0.38f, 0.54f, 0.24f, 1.0f };
+	GLfloat mat_s_leaf[] = { 0.38f, 0.54f, 0.24f, 1.0f };
+	GLfloat low_sh_leaf[] = { 5.0f };
+	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a_leaf);
+	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d_leaf);
+	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s_leaf);
+	glMaterialfv(GL_FRONT, GL_SHININESS, low_sh_leaf);
+
+	for (int i = 0; i < treeNum; i++)
+		drawLeaf(trees[i], treeSize[i]);
 
 	glutSwapBuffers();
 }
@@ -678,7 +927,7 @@ void reshape(int w, int h) {
 	glViewport(0, 0, w, h);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
-	gluPerspective(60.0, aspect, 0.01, 100.0);
+	gluPerspective(60.0, aspect, 0.01, 150.0);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
 }
@@ -688,7 +937,7 @@ void doIdle() {
 	if (g_ViewState == VIEWSTATE::AUTO) {
 		driveSpeed = 10.0f;
 		if (railDerivative[position] != 0)
-			driveSpeed = std::max(10.0, 10 * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
+			driveSpeed = std::max(10.0, deltaT * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
 		positionf += round(driveSpeed);
 		if (positionf > 1000 * (g_Splines->numControlPoints - 3))	//assume varies u from 0.0 0.001 0.002 ... 1.0
 			position = 0, positionf = 0;												//so total will be 1000 * (g_Splines->numControlPoints-3) + 1 points
@@ -822,13 +1071,19 @@ void keyboard(unsigned char key, int x, int y) {
 void specialKeyboard(int key, int x, int y) {
 	switch (key) {
 	case GLUT_KEY_UP:
-		if (g_ViewState == VIEWSTATE::DRIVE) {
+		if (g_ViewState == VIEWSTATE::AUTO) {
+			++deltaT;
+		}
+		else if (g_ViewState == VIEWSTATE::DRIVE) {
 			driveSpeed += acceleration;
 			driveSpeed = std::min(driveSpeed, 30.0f);
 		}
 		break;
 	case GLUT_KEY_DOWN:
-		if (g_ViewState == VIEWSTATE::DRIVE) {
+		if (g_ViewState == VIEWSTATE::AUTO) {
+			--deltaT;
+		}
+		else if (g_ViewState == VIEWSTATE::DRIVE) {
 			driveSpeed -= acceleration;
 			driveSpeed = std::max(driveSpeed, 0.0f);
 		}
@@ -947,7 +1202,7 @@ int _tmain(int argc, _TCHAR* argv[]) {
 
 	// If you need to load textures use below instead of pic library:
 	//readImage("spiral.jpg", imageBGR, false);
-	readImage("texture/ground.jpg", groundBGR, false);
+	readImage("texture/ground.png", groundBGR, false);
 	readImage("texture/skybox/back.bmp", sky[0], false);
 	readImage("texture/skybox/bottom.bmp", sky[1], false);
 	readImage("texture/skybox/front.bmp", sky[2], false);

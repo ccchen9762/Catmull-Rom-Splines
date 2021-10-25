@@ -1,5 +1,5 @@
 1
-splines/upsidedown.sp
+splines/cs1.sp
 
 circle.sp
 cs1.sp
