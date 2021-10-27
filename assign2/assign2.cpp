@@ -26,8 +26,10 @@
 /* Object where you can load an image */
 cv::Mat3b groundBGR;
 cv::Mat3b sky[6];	//back, bottom, front, left, right, top
+cv::Mat3b woodBGR;
+cv::Mat3b cheeseBGR;
 
-GLuint texture[7];
+GLuint texture[9];
 
 struct spaceVector {
 	double x;
@@ -36,16 +38,8 @@ struct spaceVector {
 
 	spaceVector(const double x0 = 0, const double y0 = 0, const double z0 = 0) : x(x0), y(y0), z(z0) {}
 
-	//inline spaceVector operator+(const spaceVector& v0) { return spaceVector(x + v0.x, y + v0.y, z + v0.z); }
-	//inline spaceVector operator-(const spaceVector& v0) { return spaceVector(x - v0.x, y - v0.y, z - v0.z); }
-	//inline spaceVector operator*(int num) { return spaceVector(x * num, y * num, z * num); }
 	inline spaceVector operator*(float num) { return spaceVector(x * num, y * num, z * num); }
-	/*
-	inline spaceVector& operator+=(const spaceVector& v0) { x += v0.x, y += v0.y, z += v0.z; return *this; }
-	inline spaceVector& operator-=(const spaceVector& v0) { x -= v0.x, y -= v0.y, z -= v0.z; return *this; }
-	inline spaceVector& operator*=(int num) { x *= num, y *= num, z *= num; return *this; }
-	inline spaceVector& operator*=(float num) { x *= num, y *= num, z *= num; return *this; }
-	*/
+
 	void normalize() {
 		float scalar = sqrt(pow(x, 2) + pow(y, 2) + pow(z, 2));
 		x /= scalar, y /= scalar, z /= scalar;
@@ -109,7 +103,7 @@ float width = 0.0f, length = 0.0f;
 int position = 0, positionf = 0;
 float progress = 0.0f;
 //speed
-float driveSpeed = 0.0f, acceleration = 1.0f, deltaT = 10.0f;
+float driveSpeed = 0.0f, acceleration = 1.0f, deltaT = 1.0f;
 
 // transformation variable
 float g_vLandRotate[3] = { 0.0f, 0.0f, 0.0f };
@@ -128,6 +122,9 @@ point* trees;
 float* treeSize;
 int treeNum = 40;
 
+float textureCoord[40];
+int textureID = 0;
+
 spaceVector xaxis(1.0, 0.0, 0.0);
 spaceVector yaxis(0.0, -1.0, 0.0);
 spaceVector zaxis(0.0, 0.0, 1.0);
@@ -142,11 +139,11 @@ VIEWSTATE g_ViewState = VIEWSTATE::AUTO;
 enum class RAILSTATE { TSHAPE, SQUARE, CUBE };
 RAILSTATE g_RailState = RAILSTATE::TSHAPE;
 
-bool circular = true;
-
+//for computing FPS
 std::chrono::high_resolution_clock::time_point thisFrame = std::chrono::high_resolution_clock::now();
 std::chrono::high_resolution_clock::time_point accumulateTime = std::chrono::high_resolution_clock::now();
 
+//result = u cross v
 inline void crossProduct(const spaceVector& u, const spaceVector& v, spaceVector& result) {
 	result.x = u.y * v.z - u.z * v.y, result.y = u.z * v.x - u.x * v.z, result.z = u.x * v.y - u.y * v.x;
 }
@@ -272,7 +269,7 @@ void buildSpline(const point& c1, const point& c2, const point& c3, const point&
 	// draw curve
 	subdivide(0.0f, 1.0f, splineMatrix, c1, c4);
 
-	if (last) {	// draw last point
+	if (last) {	// draw last point, because previous function only draw first point of line segment
 		float uMatrix[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 		float* result = matrixMultiplication(uMatrix, splineMatrix, 1, 4, 4, 3);
 		rail[len].x = result[0], rail[len].y = result[1], rail[len].z = result[2];
@@ -358,7 +355,7 @@ void myinit() {
 	hMin = round(hMin - 1.0f);
 
 	// textureInit
-	glGenTextures(7, texture);
+	glGenTextures(9, texture);
 	// ground
 	glBindTexture(GL_TEXTURE_2D, texture[0]);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -376,6 +373,20 @@ void myinit() {
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 512, 512, 0, GL_RGB, GL_UNSIGNED_BYTE, sky[i - 1].data);
 	}
 
+	glBindTexture(GL_TEXTURE_2D, texture[7]);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 512, 512, GL_RGB, GL_UNSIGNED_BYTE, woodBGR.data);
+
+	glBindTexture(GL_TEXTURE_2D, texture[8]);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	gluBuild2DMipmaps(GL_TEXTURE_2D, GL_RGB, 256, 256, GL_RGB, GL_UNSIGNED_BYTE, cheeseBGR.data);
+	
 	// light initial
 	glEnable(GL_LIGHTING);
 	glEnable(GL_LIGHT0);
@@ -387,19 +398,24 @@ void myinit() {
 	glLightfv(GL_LIGHT0, GL_SPECULAR, light_specular);
 	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
 
+	//tree position initial
 	srand(time(NULL));
 
 	trees = new point[treeNum];
 	treeSize = new float[treeNum];
 	for (int i = 0; i < treeNum; i++) {
-		trees[i].x = (xMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
-		trees[i].y = (yMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
-		/*do {
+		do {
 			trees[i].x = (xMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
-		} while (xMin < trees[i].x && xMax > trees[i].x);*/
+		} while (xMin < trees[i].x && xMax > trees[i].x);	//prevent trees stuck in rails
+		do {
+			trees[i].y = (yMid - width * 1.5f) + rand() % static_cast<int>(width * 3.0f);
+		} while (yMin < trees[i].y && yMax > trees[i].y);
 		trees[i].z = hMin;
 		treeSize[i] = width * (0.005 + 0.001 * (rand() % 20));
 	}
+
+	for (int i = 0; i < 40; i++)
+		textureCoord[i] = rand() % 20 * 0.1;
 }
 
 void drawSkybox(int v1, int v2, int v3, int v4, point* vertices, const spaceVector& normal) {
@@ -660,23 +676,41 @@ void drawRail(int i, RAILSTATE draw_RailState) {
 	}
 }
 
+void drawWood(int v1, int v2, int v3, int v4, point vertices[8], const spaceVector& normalBack, const spaceVector& normalFront) {
+	glBegin(GL_POLYGON);
+	glNormal3f(normalBack.x, normalBack.y, normalBack.z);
+	glTexCoord2f(textureCoord[textureID], 3+ textureCoord[39-textureID++]);
+	glVertex3f(vertices[v1].x, vertices[v1].y, vertices[v1].z);
+	glTexCoord2f(textureCoord[textureID], 3 + textureCoord[39 - textureID++]);
+	glVertex3f(vertices[v2].x, vertices[v2].y, vertices[v2].z);
+	glNormal3f(normalFront.x, normalFront.y, normalFront.z);
+	glTexCoord2f(textureCoord[textureID], 3 + textureCoord[39 - textureID++]);
+	glVertex3f(vertices[v3].x, vertices[v3].y, vertices[v3].z);
+	glTexCoord2f(textureCoord[textureID], 3 + textureCoord[39 - textureID++]);
+	glVertex3f(vertices[v4].x, vertices[v4].y, vertices[v4].z);
+	glEnd();
+
+	if (textureID == 40)
+		textureID = 0;
+}
+
 void drawCrossbar(int i) {
 	static point last(0.0f, 0.0f, 0.0f);
-	if (pow(rail[i].x - last.x, 2) + pow(rail[i].y - last.y, 2) + pow(rail[i].z - last.z, 2) > 0.05) {
-		float alpha = 0.002f, beta = 0.03f, gamma = 0.005f, delta = 0.01f;
+	if (pow(rail[i].x - last.x, 2) + pow(rail[i].y - last.y, 2) + pow(rail[i].z - last.z, 2) > 0.02) {
+		float alpha = 0.002f, beta = 0.03f, gamma = 0.005f, delta = 0.01f, epsilon = 0.01f;
 		point vertices[8] = {
-			point(rail[i + 1].x - gamma * railNormal[i + 1].x - delta * railBinormal[i + 2].x,
-			 rail[i + 1].y - gamma * railNormal[i + 1].y - delta * railBinormal[i + 2].y,
-			 rail[i + 1].z - gamma * railNormal[i + 1].z - delta * railBinormal[i + 2].z),
-			point(rail[i + 1].x - gamma * railNormal[i + 1].x + beta * railBinormal[i + 2].x,
-			 rail[i + 1].y - gamma * railNormal[i + 1].y + beta * railBinormal[i + 2].y,
-			 rail[i + 1].z - gamma * railNormal[i + 1].z + beta * railBinormal[i + 2].z),
-			point(rail[i + 1].x - alpha * railNormal[i + 1].x + beta * railBinormal[i + 2].x,
-			 rail[i + 1].y - alpha * railNormal[i + 1].y + beta * railBinormal[i + 2].y,
-			 rail[i + 1].z - alpha * railNormal[i + 1].z + beta * railBinormal[i + 2].z),
-			point(rail[i + 1].x - alpha * railNormal[i + 1].x - delta * railBinormal[i + 2].x,
-			 rail[i + 1].y - alpha * railNormal[i + 1].y - delta * railBinormal[i + 2].y,
-			 rail[i + 1].z - alpha * railNormal[i + 1].z - delta * railBinormal[i + 2].z),
+			point(rail[i].x + epsilon * railTangent[i].x - gamma * railNormal[i].x - delta * railBinormal[i + 1].x,
+			 rail[i].y + epsilon * railTangent[i].y - gamma * railNormal[i].y - delta * railBinormal[i + 1].y,
+			 rail[i].z + epsilon * railTangent[i].z - gamma * railNormal[i].z - delta * railBinormal[i + 1].z),
+			point(rail[i].x + epsilon * railTangent[i].x - gamma * railNormal[i].x + beta * railBinormal[i + 1].x,
+			 rail[i].y + epsilon * railTangent[i].y - gamma * railNormal[i].y + beta * railBinormal[i + 1].y,
+			 rail[i].z + epsilon * railTangent[i].z - gamma * railNormal[i].z + beta * railBinormal[i + 1].z),
+			point(rail[i].x + epsilon * railTangent[i].x - alpha * railNormal[i].x + beta * railBinormal[i + 1].x,
+			 rail[i].y + epsilon * railTangent[i].y - alpha * railNormal[i].y + beta * railBinormal[i + 1].y,
+			 rail[i].z + epsilon * railTangent[i].z - alpha * railNormal[i].z + beta * railBinormal[i + 1].z),
+			point(rail[i].x + epsilon * railTangent[i].x - alpha * railNormal[i].x - delta * railBinormal[i + 1].x,
+			 rail[i].y + epsilon * railTangent[i].y - alpha * railNormal[i].y - delta * railBinormal[i + 1].y,
+			 rail[i].z + epsilon * railTangent[i].z - alpha * railNormal[i].z - delta * railBinormal[i + 1].z),
 			point(rail[i].x - gamma * railNormal[i].x - delta * railBinormal[i + 1].x,
 			 rail[i].y - gamma * railNormal[i].y - delta * railBinormal[i + 1].y,
 			 rail[i].z - gamma * railNormal[i].z - delta * railBinormal[i + 1].z),
@@ -691,12 +725,12 @@ void drawCrossbar(int i) {
 			 rail[i].z - alpha * railNormal[i].z - delta * railBinormal[i + 1].z)
 		};
 
-		drawFace(0, 3, 2, 1, vertices, railTangent[position], railTangent[position]);
-		drawFace(2, 3, 7, 6, vertices, railNormal[i + 1], railNormal[i]);
-		drawFace(3, 0, 4, 7, vertices, railBinormal[i + 2] * -1, railBinormal[i + 1] * -1);
-		drawFace(1, 2, 6, 5, vertices, railBinormal[i + 2], railBinormal[i + 1]);
-		drawFace(4, 5, 6, 7, vertices, railTangent[position] * -1, railTangent[position] * -1);
-		drawFace(0, 1, 5, 4, vertices, railNormal[i + 1] * -1, railNormal[i] * -1);
+		drawWood(0, 3, 2, 1, vertices, railTangent[position], railTangent[position]);
+		drawWood(2, 3, 7, 6, vertices, railNormal[i + 1], railNormal[i]);
+		drawWood(3, 0, 4, 7, vertices, railBinormal[i + 2] * -1, railBinormal[i + 1] * -1);
+		drawWood(1, 2, 6, 5, vertices, railBinormal[i + 2], railBinormal[i + 1]);
+		drawWood(4, 5, 6, 7, vertices, railTangent[position] * -1, railTangent[position] * -1);
+		drawWood(0, 1, 5, 4, vertices, railNormal[i + 1] * -1, railNormal[i] * -1);
 
 		last.x = rail[i].x, last.y = rail[i].y, last.z = rail[i].z;
 	}
@@ -715,12 +749,12 @@ void drawTree(point& origin, float size) {
 		origin + yaxis * size,
 	};
 
-	drawFace(0, 3, 2, 1, vertices, xaxis, xaxis);
-	drawFace(2, 3, 7, 6, vertices, yaxis, yaxis);
-	drawFace(0, 4, 7, 3, vertices, zaxis * -1, zaxis * -1);
-	drawFace(1, 2, 6, 5, vertices, zaxis, zaxis);
-	drawFace(4, 5, 6, 7, vertices, xaxis * -1, xaxis * -1);
-	drawFace(0, 1, 5, 4, vertices, yaxis * -1, yaxis * -1);
+	drawWood(0, 3, 2, 1, vertices, xaxis, xaxis);
+	drawWood(2, 3, 7, 6, vertices, yaxis, yaxis);
+	drawWood(0, 4, 7, 3, vertices, zaxis * -1, zaxis * -1);
+	drawWood(1, 2, 6, 5, vertices, zaxis, zaxis);
+	drawWood(4, 5, 6, 7, vertices, xaxis * -1, xaxis * -1);
+	drawWood(0, 1, 5, 4, vertices, yaxis * -1, yaxis * -1);
 }
 
 void drawLeaf(point& origin, float size) {
@@ -804,8 +838,6 @@ void display() {
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
 	//transformation matrix
-	float passengerOffset = 0.01f;	 //set eyeposition above the rail
-	float middleOffset = 0.01f;	//set eyepostion between 2 rails
 	if (g_ViewState == VIEWSTATE::OVERVIEW) {	//manual control
 		glTranslatef(g_vLandTranslate[0], g_vLandTranslate[1], g_vLandTranslate[2]);
 		glRotatef(g_vLandRotate[0], 1.0, 0.0, 0.0);
@@ -815,6 +847,8 @@ void display() {
 	point passenger((rail[position + 1].x - rail[position].x) * progress + rail[position].x,
 					(rail[position + 1].y - rail[position].y) * progress + rail[position].y,
 					(rail[position + 1].z - rail[position].z) * progress + rail[position].z);
+	float passengerOffset = 0.01f;	 //set eyeposition above the rail
+	float middleOffset = 0.01f;	//set eyepostion between 2 rails
 	gluLookAt(passenger.x + passengerOffset * railNormal[position].x + middleOffset * railBinormal[position + 1].x,
 			  passenger.y + passengerOffset * railNormal[position].y + middleOffset * railBinormal[position + 1].y,
 			  passenger.z + passengerOffset * railNormal[position].z + middleOffset * railBinormal[position + 1].z,
@@ -827,7 +861,6 @@ void display() {
 	//GLfloat light_position[] = { xMid, yMid, hMax+3.0, 1.0f };
 	glLightfv(GL_LIGHT0, GL_POSITION, light_position);
 
-	//glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 	//ground plane
 	glEnable(GL_TEXTURE_2D);
@@ -850,7 +883,7 @@ void display() {
 	GLfloat mat_a_cart[] = { 1.0f, 0.1f, 0.1f, 1.0f };
 	GLfloat mat_d_cart[] = { 0.7f, 0.1f, 0.1f, 1.0f };
 	GLfloat mat_s_cart[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-	GLfloat low_sh_cart[] = { 10.0f };
+	GLfloat low_sh_cart[] = { 0.0f };
 	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a_cart);
 	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d_cart);
 	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s_cart);
@@ -863,6 +896,31 @@ void display() {
 	drawCart(0.014f, 0.002f, 0.004f, 0.003f, 0.004f, passenger);
 	drawCart(0.014f, 0.002f, 0.004f, 0.003f, 0.016f, passenger);
 
+	passenger += railNormal[position] * 0.001f;
+	passenger += railBinormal[position + 1] * 0.008f;
+	passenger += railTangent[position] * 0.0159f;
+	point vertices[4] = {
+		passenger,
+		passenger + railNormal[position] * 0.004f,
+		passenger + railBinormal[position + 1] * 0.004f + railNormal[position] * 0.004f,
+		passenger + railBinormal[position + 1] * 0.004f
+	};
+
+	// uncomment if you want to ride with cheese
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, texture[8]);
+	glBegin(GL_POLYGON);
+	glTexCoord2f(0.0, 1.0);
+	glVertex3f(vertices[0].x, vertices[0].y, vertices[0].z);
+	glTexCoord2f(0.0, 0.0);
+	glVertex3f(vertices[1].x, vertices[1].y, vertices[1].z);
+	glTexCoord2f(1.0, 0.0);
+	glVertex3f(vertices[2].x, vertices[2].y, vertices[2].z);
+	glTexCoord2f(1.0, 1.0);
+	glVertex3f(vertices[3].x, vertices[3].y, vertices[3].z);
+	glEnd();
+	glDisable(GL_TEXTURE_2D);
+	
 	//rail
 	GLfloat mat_a_rail[] = { 0.7f, 0.76f, 0.8f, 1.0f };
 	GLfloat mat_d_rail[] = { 0.35f, 0.38f, 0.4f, 1.0f };
@@ -875,7 +933,7 @@ void display() {
 
 	if (g_RailState == RAILSTATE::SQUARE) {
 		for (int i = 0; i < len - 1; i++) {
-			if (position - 10 < i && i < position + 1000 || (position + 1000 - len + 1)>i)
+			if (position - 10 < i && i < position + 2000 || (position + 2000 - len + 1)>i)
 				drawRail(i, RAILSTATE::SQUARE);
 			else
 				drawRail(i, RAILSTATE::CUBE);
@@ -883,29 +941,29 @@ void display() {
 	}
 	else if (g_RailState == RAILSTATE::TSHAPE) {
 		for (int i = 0; i < len - 1; i++) {
-			if (position - 10 < i && i < position + 1000 || (position + 1000 - len + 1)>i)
+			if (position - 10 < i && i < position + 2000 || (position + 2000 - len + 1)>i)
 				drawRail(i, RAILSTATE::TSHAPE);
 			else
 				drawRail(i, RAILSTATE::CUBE);
 		}
 	}
 
-	GLfloat mat_a_wood[] = { 0.84f, 0.58f, 0.5f, 1.0f };
-	GLfloat mat_d_wood[] = { 0.42f, 0.29f, 0.25f, 1.0f };
-	GLfloat mat_s_wood[] = { 0.42f, 0.29f, 0.25f, 1.0f };
-	GLfloat low_sh_wood[] = { 1.0f };
-	glMaterialfv(GL_FRONT, GL_AMBIENT, mat_a_wood);
-	glMaterialfv(GL_FRONT, GL_DIFFUSE, mat_d_wood);
-	glMaterialfv(GL_FRONT, GL_SPECULAR, mat_s_wood);
-	glMaterialfv(GL_FRONT, GL_SHININESS, low_sh_wood);
-
+	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, texture[7]);
+	
+	//wooden crossbar
 	for (int i = 0; i < len - 1; i++)
 		drawCrossbar(i);
+	textureID = 0;
 
 	glShadeModel(GL_FLAT);
 	//render trees
 	for (int i = 0; i < treeNum; i++)
 		drawTree(trees[i], treeSize[i]);
+	textureID = 0;
+
+	glDisable(GL_TEXTURE_2D);
 
 	GLfloat mat_a_leaf[] = { 0.76f, 1.0f, 0.48f, 1.0f };
 	GLfloat mat_d_leaf[] = { 0.38f, 0.54f, 0.24f, 1.0f };
@@ -935,9 +993,9 @@ void reshape(int w, int h) {
 void doIdle() {
 	//control moving speed
 	if (g_ViewState == VIEWSTATE::AUTO) {
-		driveSpeed = 10.0f;
+		driveSpeed = 5.0f;
 		if (railDerivative[position] != 0)
-			driveSpeed = std::max(10.0, deltaT * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position]);
+			driveSpeed = std::max(5.0, deltaT * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position] * -railTangent[position].z);
 		positionf += round(driveSpeed);
 		if (positionf > 1000 * (g_Splines->numControlPoints - 3))	//assume varies u from 0.0 0.001 0.002 ... 1.0
 			position = 0, positionf = 0;												//so total will be 1000 * (g_Splines->numControlPoints-3) + 1 points
@@ -1073,6 +1131,8 @@ void specialKeyboard(int key, int x, int y) {
 	case GLUT_KEY_UP:
 		if (g_ViewState == VIEWSTATE::AUTO) {
 			++deltaT;
+			deltaT = std::min(30.0f, deltaT);
+			printf("%f\n", deltaT);
 		}
 		else if (g_ViewState == VIEWSTATE::DRIVE) {
 			driveSpeed += acceleration;
@@ -1082,6 +1142,8 @@ void specialKeyboard(int key, int x, int y) {
 	case GLUT_KEY_DOWN:
 		if (g_ViewState == VIEWSTATE::AUTO) {
 			--deltaT;
+			deltaT = std::max(1.0f, deltaT);
+			printf("%f\n", deltaT);
 		}
 		else if (g_ViewState == VIEWSTATE::DRIVE) {
 			driveSpeed -= acceleration;
@@ -1209,6 +1271,8 @@ int _tmain(int argc, _TCHAR* argv[]) {
 	readImage("texture/skybox/left.bmp", sky[3], false);
 	readImage("texture/skybox/right.bmp", sky[4], false);
 	readImage("texture/skybox/top.bmp", sky[5], false);
+	readImage("texture/wood.jpg", woodBGR, false);
+	readImage("texture/cheese.jpg", cheeseBGR, false);
 
 	// Demonstrates to loop across image and access pixel values:
 	// Note this function doesn't do anything, but you may find it useful:

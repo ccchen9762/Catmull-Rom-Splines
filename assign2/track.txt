@@ -1,5 +1,5 @@
 1
-splines/cs1.sp
+splines/cheese.sp
 
 circle.sp
 cs1.sp
