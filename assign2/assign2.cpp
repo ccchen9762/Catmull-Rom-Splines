@@ -993,9 +993,8 @@ void reshape(int w, int h) {
 void doIdle() {
 	//control moving speed
 	if (g_ViewState == VIEWSTATE::AUTO) {
-		driveSpeed = 5.0f;
 		if (railDerivative[position] != 0)
-			driveSpeed = std::max(5.0, deltaT * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position] * -railTangent[position].z);
+			driveSpeed = std::max(10.0, deltaT * sqrt(2.0 * 9.8 * (hMax - rail[position].z)) / railDerivative[position] * -railTangent[position].z);
 		positionf += round(driveSpeed);
 		if (positionf > 1000 * (g_Splines->numControlPoints - 3))	//assume varies u from 0.0 0.001 0.002 ... 1.0
 			position = 0, positionf = 0;												//so total will be 1000 * (g_Splines->numControlPoints-3) + 1 points
@@ -1131,12 +1130,12 @@ void specialKeyboard(int key, int x, int y) {
 	case GLUT_KEY_UP:
 		if (g_ViewState == VIEWSTATE::AUTO) {
 			++deltaT;
-			deltaT = std::min(30.0f, deltaT);
+			deltaT = std::min(50.0f, deltaT);
 			printf("%f\n", deltaT);
 		}
 		else if (g_ViewState == VIEWSTATE::DRIVE) {
 			driveSpeed += acceleration;
-			driveSpeed = std::min(driveSpeed, 30.0f);
+			driveSpeed = std::min(driveSpeed, 50.0f);
 		}
 		break;
 	case GLUT_KEY_DOWN:
@@ -1272,7 +1271,7 @@ int _tmain(int argc, _TCHAR* argv[]) {
 	readImage("texture/skybox/right.bmp", sky[4], false);
 	readImage("texture/skybox/top.bmp", sky[5], false);
 	readImage("texture/wood.jpg", woodBGR, false);
-	readImage("texture/cheese.jpg", cheeseBGR, false);
+	readImage("texture/cheese.png", cheeseBGR, false);
 
 	// Demonstrates to loop across image and access pixel values:
 	// Note this function doesn't do anything, but you may find it useful:
